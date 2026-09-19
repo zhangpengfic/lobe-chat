@@ -2,6 +2,7 @@ import { HomeIcon, SearchIcon } from 'lucide-react';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useActiveWorkspaceSlug } from '@/business/client/hooks/useActiveWorkspaceSlug';
 import { getRouteById } from '@/config/routes';
 import { useGlobalStore } from '@/store/global';
 import { SidebarTabKey } from '@/store/global/initialState';
@@ -36,6 +37,7 @@ export const useNavLayout = (): NavLayout => {
   const { t } = useTranslation('common');
   const toggleCommandMenu = useGlobalStore((s) => s.toggleCommandMenu);
   const { showMarket, hideGitHub } = useServerConfigStore(featureFlagsSelectors);
+  const activeWorkspaceSlug = useActiveWorkspaceSlug();
 
   const topNavItems = useMemo(
     () =>
@@ -53,10 +55,16 @@ export const useNavLayout = (): NavLayout => {
           url: '/',
         },
         {
-          icon: getRouteById('page')!.icon,
-          key: SidebarTabKey.Pages,
-          title: t('tab.pages'),
-          url: '/page',
+          icon: getRouteById('tasks')!.icon,
+          key: SidebarTabKey.Tasks,
+          title: t('tab.tasks'),
+          url: '/tasks',
+        },
+        {
+          icon: getRouteById('resource')!.icon,
+          key: SidebarTabKey.Resource,
+          title: t('tab.resource'),
+          url: '/resource',
         },
       ] as NavItem[],
     [t, toggleCommandMenu],
@@ -66,6 +74,12 @@ export const useNavLayout = (): NavLayout => {
     () =>
       [
         {
+          icon: getRouteById('image')!.icon,
+          key: SidebarTabKey.Image,
+          title: t('tab.generation'),
+          url: '/image',
+        },
+        {
           hidden: !showMarket,
           icon: getRouteById('community')!.icon,
           key: SidebarTabKey.Community,
@@ -73,19 +87,20 @@ export const useNavLayout = (): NavLayout => {
           url: '/community',
         },
         {
-          icon: getRouteById('resource')!.icon,
-          key: SidebarTabKey.Resource,
-          title: t('tab.resource'),
-          url: '/resource',
+          icon: getRouteById('page')!.icon,
+          key: SidebarTabKey.Pages,
+          title: t('tab.pages'),
+          url: '/page',
         },
         {
+          hidden: !!activeWorkspaceSlug,
           icon: getRouteById('memory')!.icon,
           key: SidebarTabKey.Memory,
           title: t('tab.memory'),
           url: '/memory',
         },
       ] as NavItem[],
-    [t, showMarket],
+    [t, showMarket, activeWorkspaceSlug],
   );
 
   const footer = useMemo(
@@ -101,7 +116,9 @@ export const useNavLayout = (): NavLayout => {
   const userPanel = useMemo(
     () => ({
       showDataImporter: false,
-      showMemory: true,
+      // Memory now appears in the sidebar by default; drop the duplicate entry
+      // from the user dropdown to keep that menu focused on account / settings.
+      showMemory: false,
     }),
     [],
   );

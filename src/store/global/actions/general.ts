@@ -1,21 +1,35 @@
+import { AGENT_CHAT_TOPIC_URL, GROUP_CHAT_TOPIC_URL } from '@lobechat/const';
 import isEqual from 'fast-deep-equal';
 import { gt, parse, valid } from 'semver';
-import { type SWRResponse } from 'swr';
+import type { SWRResponse } from 'swr';
 
+import { getActiveWorkspaceId } from '@/business/client/hooks/useActiveWorkspaceId';
+import { getActiveWorkspaceSlug } from '@/business/client/hooks/useActiveWorkspaceSlug';
+import { WEB_APP_VERSION } from '@/const/appVersion';
 import { CURRENT_VERSION, isDesktop } from '@/const/version';
+import { buildWorkspaceAwarePath } from '@/features/Workspace/workspaceAwarePath';
 import { useOnlyFetchOnceSWR } from '@/libs/swr';
+import { globalKeys } from '@/libs/swr/keys';
 import { globalService } from '@/services/global';
 import { getElectronStoreState } from '@/store/electron';
 import { electronSyncSelectors } from '@/store/electron/selectors';
-import { type SystemStatus } from '@/store/global/initialState';
-import { type StoreSetter } from '@/store/types';
-import { type LocaleMode } from '@/types/locale';
+import type { SystemStatus } from '@/store/global/initialState';
+import {
+  DEFAULT_HOME_SIDEBAR_EXPANDED_KEYS,
+  DEFAULT_RESOURCE_MANAGER_COLUMN_WIDTHS,
+} from '@/store/global/initialState';
+import type { StoreSetter } from '@/store/types';
+import type { LocaleMode } from '@/types/locale';
 import { switchLang } from '@/utils/client/switchLang';
 import { merge } from '@/utils/merge';
 import { setNamespace } from '@/utils/storeDebug';
 
-import { DEFAULT_HIDDEN_SECTIONS, DEFAULT_SIDEBAR_ITEMS } from '../selectors/systemStatus';
-import { type GlobalStore } from '../store';
+import {
+  DEFAULT_HIDDEN_SECTIONS,
+  DEFAULT_SIDEBAR_ITEMS,
+  routeOverlayWrites,
+} from '../selectors/systemStatus';
+import type { GlobalStore } from '../store';
 
 const n = setNamespace('g');
 
@@ -34,8 +48,6 @@ export class GlobalGeneralActionImpl {
   }
 
   openAgentInNewWindow = async (agentId: string): Promise<void> => {
-    const url = `/agent/${agentId}${isDesktop ? '?mode=single' : ''}`;
-
     if (isDesktop) {
       try {
         const { ensureElectronIpc } = await import('@/utils/electron/ipc');
@@ -55,27 +67,27 @@ export class GlobalGeneralActionImpl {
       }
     } else {
       // Open in popup window for browser
+      const browserUrl = buildWorkspaceAwarePath(`/agent/${agentId}`, getActiveWorkspaceSlug());
       const width = 1200;
       const height = 800;
       const left = (window.screen.width - width) / 2;
       const top = (window.screen.height - height) / 2;
       const features = `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,status=yes`;
-      window.open(url, `agent_${agentId}`, features);
+      window.open(browserUrl, `agent_${agentId}`, features);
     }
   };
 
   openTopicInNewWindow = async (agentId: string, topicId: string): Promise<void> => {
-    const url = `/agent/${agentId}?topic=${topicId}${isDesktop ? '&mode=single' : ''}`;
+    const popupPath = `/popup/agent/${agentId}/${topicId}`;
 
     if (isDesktop) {
       try {
         const { ensureElectronIpc } = await import('@/utils/electron/ipc');
-        const path = `/agent/${agentId}?topic=${topicId}&mode=single`;
 
         const result = await ensureElectronIpc().windows.createMultiInstanceWindow({
-          path,
-          templateId: 'chatSingle',
-          uniqueId: `chat_${agentId}_${topicId}`,
+          path: popupPath,
+          templateId: 'topicPopup',
+          uniqueId: `topicPopup_agent_${agentId}_${topicId}`,
         });
 
         if (!result.success) {
@@ -86,12 +98,49 @@ export class GlobalGeneralActionImpl {
       }
     } else {
       // Open in popup window for browser
+      const browserUrl = buildWorkspaceAwarePath(
+        AGENT_CHAT_TOPIC_URL(agentId, topicId),
+        getActiveWorkspaceSlug(),
+      );
       const width = 1200;
       const height = 800;
       const left = (window.screen.width - width) / 2;
       const top = (window.screen.height - height) / 2;
       const features = `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,status=yes`;
-      window.open(url, `agent_${agentId}_topic_${topicId}`, features);
+      window.open(browserUrl, `agent_${agentId}_topic_${topicId}`, features);
+    }
+  };
+
+  openGroupTopicInNewWindow = async (groupId: string, topicId: string): Promise<void> => {
+    const popupPath = `/popup/group/${groupId}/${topicId}`;
+
+    if (isDesktop) {
+      try {
+        const { ensureElectronIpc } = await import('@/utils/electron/ipc');
+
+        const result = await ensureElectronIpc().windows.createMultiInstanceWindow({
+          path: popupPath,
+          templateId: 'topicPopup',
+          uniqueId: `topicPopup_group_${groupId}_${topicId}`,
+        });
+
+        if (!result.success) {
+          console.error('Failed to open group topic in new window:', result.error);
+        }
+      } catch (error) {
+        console.error('Error opening group topic in new window:', error);
+      }
+    } else {
+      const browserUrl = buildWorkspaceAwarePath(
+        GROUP_CHAT_TOPIC_URL(groupId, topicId),
+        getActiveWorkspaceSlug(),
+      );
+      const width = 1200;
+      const height = 800;
+      const left = (window.screen.width - width) / 2;
+      const top = (window.screen.height - height) / 2;
+      const features = `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,status=yes`;
+      window.open(browserUrl, `group_${groupId}_topic_${topicId}`, features);
     }
   };
 
@@ -116,11 +165,13 @@ export class GlobalGeneralActionImpl {
     }
   };
 
-  updateResourceManagerColumnWidth = (column: 'name' | 'date' | 'size', width: number): void => {
-    const currentWidths = this.#get().status.resourceManagerColumnWidths || {
-      date: 160,
-      name: 574,
-      size: 140,
+  updateResourceManagerColumnWidth = (
+    column: 'name' | 'date' | 'size' | 'uploader',
+    width: number,
+  ): void => {
+    const currentWidths = {
+      ...DEFAULT_RESOURCE_MANAGER_COLUMN_WIDTHS,
+      ...this.#get().status.resourceManagerColumnWidths,
     };
 
     this.#get().updateSystemStatus({
@@ -131,17 +182,61 @@ export class GlobalGeneralActionImpl {
     });
   };
 
+  /**
+   * Replace the workspace overlay's sidebar-layout fields wholesale. An
+   * absent field is DELETED from the overlay (falling back to "untouched"
+   * defaults) — `updateSystemStatus` deep-merges and can neither delete keys
+   * nor drop a field the incoming server preference no longer carries.
+   */
+  setWorkspaceSidebarOverlay = (layout: {
+    hiddenSidebarSections?: string[];
+    sidebarItems?: string[];
+  }): void => {
+    if (!this.#get().isStatusInit) return;
+    const status = this.#get().status;
+    const {
+      hiddenSidebarSections: _hidden,
+      sidebarItems: _items,
+      ...rest
+    } = status.workspace ?? {};
+    const workspace = {
+      ...rest,
+      ...(layout.hiddenSidebarSections
+        ? { hiddenSidebarSections: layout.hiddenSidebarSections }
+        : {}),
+      ...(layout.sidebarItems ? { sidebarItems: layout.sidebarItems } : {}),
+    };
+    if (isEqual(status.workspace ?? {}, workspace)) return;
+    const nextStatus = { ...status, workspace };
+    this.#set({ status: nextStatus }, false, n('setWorkspaceSidebarOverlay'));
+    this.#get().statusStorage.saveToLocalStorage(nextStatus);
+  };
+
   resetSidebarCustomization = (): void => {
     this.#get().updateSystemStatus(
-      { hiddenSidebarSections: DEFAULT_HIDDEN_SECTIONS, sidebarItems: DEFAULT_SIDEBAR_ITEMS },
+      {
+        hiddenSidebarSections: DEFAULT_HIDDEN_SECTIONS,
+        sidebarExpandedKeys: DEFAULT_HOME_SIDEBAR_EXPANDED_KEYS,
+        sidebarItems: DEFAULT_SIDEBAR_ITEMS,
+      },
       n('resetSidebarCustomization'),
     );
   };
 
-  updateSystemStatus = (status: Partial<SystemStatus>, action?: any): void => {
+  updateSystemStatus = (
+    status: Partial<SystemStatus>,
+    action?: any,
+    options?: { skipWorkspaceOverlay?: boolean },
+  ): void => {
     if (!this.#get().isStatusInit) return;
 
-    const nextStatus = merge(this.#get().status, status);
+    // When inside a workspace, route whitelisted sidebar-layout fields into
+    // `status.workspace.*` so personal-mode preferences stay untouched. The
+    // init path bypasses routing — it rehydrates whatever shape was persisted.
+    const workspaceId = options?.skipWorkspaceOverlay ? null : getActiveWorkspaceId();
+    const routedPatch = routeOverlayWrites(status, workspaceId);
+
+    const nextStatus = merge(this.#get().status, routedPatch);
 
     if (isEqual(this.#get().status, nextStatus)) return;
 
@@ -151,14 +246,15 @@ export class GlobalGeneralActionImpl {
 
   useCheckLatestVersion = (enabledCheck: boolean = true): SWRResponse<string> => {
     return useOnlyFetchOnceSWR(
-      enabledCheck ? 'checkLatestVersion' : null,
+      enabledCheck ? globalKeys.latestVersion() : null,
       async () => globalService.getLatestVersion(),
       {
         focusThrottleInterval: 1000 * 60 * 30,
         onSuccess: (data: string) => {
-          if (!valid(CURRENT_VERSION) || !valid(data)) return;
+          const version = isDesktop ? CURRENT_VERSION : WEB_APP_VERSION;
+          if (!valid(version) || !valid(data)) return;
 
-          const currentVersion = parse(CURRENT_VERSION);
+          const currentVersion = parse(version);
           const latestVersion = parse(data);
 
           if (!currentVersion || !latestVersion) return;
@@ -176,10 +272,8 @@ export class GlobalGeneralActionImpl {
 
   useCheckServerVersion = (): SWRResponse<string | null> => {
     return useOnlyFetchOnceSWR(
-      isDesktop &&
-        // only check server version for self-hosted remote server
-        electronSyncSelectors.storageMode(getElectronStoreState()) !== 'cloud'
-        ? 'checkServerVersion'
+      isDesktop && !electronSyncSelectors.isOfficialServer(getElectronStoreState())
+        ? globalKeys.serverVersion()
         : null,
       async () => globalService.getServerVersion(),
       {
@@ -226,7 +320,7 @@ export class GlobalGeneralActionImpl {
 
   useInitSystemStatus = (): SWRResponse => {
     return useOnlyFetchOnceSWR<SystemStatus>(
-      'initSystemStatus',
+      globalKeys.systemStatus(),
       () => this.#get().statusStorage.getFromLocalStorage(),
       {
         onSuccess: (status) => {
@@ -237,9 +331,12 @@ export class GlobalGeneralActionImpl {
             ...status,
             showCommandMenu: false,
             showHotkeyHelper: false,
+            workingSidebarRevealRequest: undefined,
           };
 
-          this.#get().updateSystemStatus(statusWithResetTransientStates, 'initSystemStatus');
+          this.#get().updateSystemStatus(statusWithResetTransientStates, 'initSystemStatus', {
+            skipWorkspaceOverlay: true,
+          });
         },
       },
     );

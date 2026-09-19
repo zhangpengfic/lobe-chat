@@ -10,8 +10,9 @@ import { useTranslation } from 'react-i18next';
 
 import NeuralNetworkLoading from '@/components/NeuralNetworkLoading';
 import { useClientDataSWR } from '@/libs/swr';
+import { statsKeys } from '@/libs/swr/keys';
+import { agentService } from '@/services/agent';
 import { messageService } from '@/services/message';
-import { sessionService } from '@/services/session';
 import { topicService } from '@/services/topic';
 import { useServerConfigStore } from '@/store/serverConfig';
 import { formatShortenNumber } from '@/utils/format';
@@ -45,19 +46,20 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
 
 const DataStatistics = memo<Omit<FlexboxProps, 'children'>>(({ style, ...rest }) => {
   const mobile = useServerConfigStore((s) => s.isMobile);
-  // sessions
-  const { data: sessions, isLoading: sessionsLoading } = useClientDataSWR('count-sessions', () =>
-    sessionService.countSessions(),
+  // assistants (counted from the agents table — the sidebar list source of truth)
+  const { data: agents, isLoading: agentsLoading } = useClientDataSWR(statsKeys.countAgents(), () =>
+    agentService.countAgents(),
   );
   // topics
-  const { data: topics, isLoading: topicsLoading } = useClientDataSWR('count-topics', () =>
+  const { data: topics, isLoading: topicsLoading } = useClientDataSWR(statsKeys.countTopics(), () =>
     topicService.countTopics(),
   );
   // messages
   const { data: { messages, messagesToday } = {}, isLoading: messagesLoading } = useClientDataSWR(
-    'count-messages',
+    statsKeys.countMessages(),
     async () => ({
-      messages: await messageService.countMessages(),
+      messages: await messageService.countMessages({ approximate: true }),
+      // today's delta stays exact — it is small, cheap, and shown as "+N"
       messagesToday: await messageService.countMessages({
         startDate: today().format('YYYY-MM-DD'),
       }),
@@ -70,7 +72,7 @@ const DataStatistics = memo<Omit<FlexboxProps, 'children'>>(({ style, ...rest })
 
   const items = [
     {
-      count: sessionsLoading || isUndefined(sessions) ? loading : sessions,
+      count: agentsLoading || isUndefined(agents) ? loading : agents,
       key: 'sessions',
       title: t('dataStatistics.sessions'),
     },

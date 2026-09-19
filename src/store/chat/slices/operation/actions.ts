@@ -5,11 +5,14 @@ import { produce } from 'immer';
 import { type ChatStore } from '@/store/chat/store';
 import { type MessageMapKeyInput } from '@/store/chat/utils/messageMapKey';
 import { messageMapKey } from '@/store/chat/utils/messageMapKey';
+import { topicMapKey } from '@/store/chat/utils/topicMapKey';
+import { getHomeStoreState } from '@/store/home';
 import { type StoreSetter } from '@/store/types';
 import { setNamespace } from '@/utils/storeDebug';
 
 import {
   type AfterCompletionCallback,
+  AI_RUNTIME_OPERATION_TYPES,
   type Operation,
   type OperationCancelContext,
   type OperationContext,
@@ -44,27 +47,48 @@ export class OperationActionsImpl {
     this.#get = get;
   }
 
-  internal_getConversationContext = (context?: { operationId?: string }): MessageMapKeyInput => {
-    if (context?.operationId) {
-      const operation = this.#get().operations[context.operationId];
+  internal_getConversationContext = (reference?: {
+    context?: MessageMapKeyInput;
+    operationId?: string;
+  }): MessageMapKeyInput => {
+    if (reference?.context) return reference.context;
+
+    if (reference?.operationId) {
+      const operation = this.#get().operations[reference.operationId];
       if (!operation) {
+        // The op was already cleaned up (e.g. completed CC turn whose
+        // runtime_end fired and was GC'd 30s later), but a late caller
+        // — typically a long-lived intervention surface — still carries
+        // the opId. Throwing here would tear down the optimistic write
+        // and any follow-up IPC the caller was about to perform, so we
+        // degrade to the global-state fallback and log loudly.
         log(
-          '[internal_getConversationContext] ERROR: Operation not found: %s',
-          context.operationId,
+          '[internal_getConversationContext] WARNING: Operation not found, falling back to global state: %s',
+          reference.operationId,
         );
-        throw new Error(`Operation not found: ${context.operationId}`);
+        console.warn(
+          '[internal_getConversationContext] operation not found, using global state:',
+          reference.operationId,
+        );
+      } else {
+        const { agentId, topicId, threadId, scope, groupId, documentId } = operation.context;
+        log(
+          '[internal_getConversationContext] get from operation %s: agentId=%s, topicId=%s, threadId=%s, scope=%s, groupId=%s, documentId=%s',
+          reference.operationId,
+          agentId,
+          topicId,
+          threadId,
+          scope,
+          groupId,
+          documentId,
+        );
+        // Spread the whole operation context so every bucket-key field carries
+        // through — notably `documentId` (page-scoped optimistic writes resolve
+        // to the same `page_<agent>_<documentId>` bucket the editor reads from,
+        // not `page_<agent>_new`) and `subAgentId` (group_agent scope's
+        // subTopicId). Only agentId needs the non-null assertion.
+        return { ...operation.context, agentId: agentId! };
       }
-      const { agentId, topicId, threadId, scope, isNew, groupId } = operation.context;
-      log(
-        '[internal_getConversationContext] get from operation %s: agentId=%s, topicId=%s, threadId=%s, scope=%s, groupId=%s',
-        context.operationId,
-        agentId,
-        topicId,
-        threadId,
-        scope,
-        groupId,
-      );
-      return { agentId: agentId!, topicId, threadId, scope, isNew, groupId };
     }
 
     // Fallback to global state
@@ -362,17 +386,34 @@ export class OperationActionsImpl {
     );
   };
 
-  cancelOperation = (operationId: string, reason: string = 'User cancelled'): void => {
+  /**
+   * Cancels an operation and reports whether its transport shutdown was confirmed.
+   *
+   * Use when:
+   * - A caller needs to stop an operation and its child operations.
+   * - A replacement task must not start after a failed transport cancellation.
+   *
+   * Expects:
+   * - `operationId` may already be absent or terminal; those states are safe no-ops.
+   * - Registered cancel handlers reject when their underlying transport remains active.
+   *
+   * Returns:
+   * - `true` when every cancellation handler settled successfully, otherwise `false`.
+   */
+  cancelOperation = async (
+    operationId: string,
+    reason: string = 'User cancelled',
+  ): Promise<boolean> => {
     const operation = this.#get().operations[operationId];
     if (!operation) {
       log('[cancelOperation] operation not found: %s', operationId);
-      return;
+      return true;
     }
 
     // Skip if already cancelled or completed
     if (operation.status === 'cancelled' || operation.status === 'completed') {
       log('[cancelOperation] operation %s already %s, skipping', operationId, operation.status);
-      return;
+      return true;
     }
 
     log(
@@ -391,15 +432,16 @@ export class OperationActionsImpl {
 
     // 2. Set isAborting flag immediately for agent-runtime operations.
     // This ensures UI (loading button) responds instantly to user cancellation.
-    // Applies to both client-side (execAgentRuntime) and Gateway-mode
-    // (execServerAgentRuntime) runs — the latter needs the flag so the UI
-    // transitions out of loading right away, without waiting for the
-    // round-trip WS `session_complete` after the server acknowledges interrupt.
-    if (operation.type === 'execAgentRuntime' || operation.type === 'execServerAgentRuntime') {
+    // Applies to all AI runtime operation types so the UI transitions out of
+    // loading right away without waiting for the process to fully terminate.
+    if (AI_RUNTIME_OPERATION_TYPES.includes(operation.type)) {
       this.#get().updateOperationMetadata(operationId, { isAborting: true });
     }
 
-    // 3. Call cancel handler if registered
+    // 3. Call cancel handler if registered. The local state transition below
+    // remains synchronous, while callers such as Send now can await the returned
+    // promise before starting a replacement native writer.
+    let cancelHandler = Promise.resolve(true);
     if (operation.onCancelHandler) {
       log('[cancelOperation] calling cancel handler for %s (type=%s)', operationId, operation.type);
 
@@ -410,15 +452,21 @@ export class OperationActionsImpl {
         metadata: operation.metadata,
       };
 
-      // Execute handler asynchronously (don't block cancellation flow)
-      // Use try-catch to handle synchronous errors, then wrap in Promise for async errors
+      // Start the handler without delaying the synchronous local state transition.
+      // The returned cancellation promise still waits for this work so replacement
+      // operations can coordinate with the underlying transport shutdown.
       try {
-        Promise.resolve(operation.onCancelHandler(cancelContext)).catch((err) => {
-          log('[cancelOperation] cancel handler error for %s: %O', operationId, err);
-        });
+        cancelHandler = Promise.resolve(operation.onCancelHandler(cancelContext)).then(
+          () => true,
+          (err) => {
+            log('[cancelOperation] cancel handler error for %s: %O', operationId, err);
+            return false;
+          },
+        );
       } catch (err) {
         // Handle synchronous errors from handler
         log('[cancelOperation] cancel handler synchronous error for %s: %O', operationId, err);
+        cancelHandler = Promise.resolve(false);
       }
     }
 
@@ -438,13 +486,37 @@ export class OperationActionsImpl {
       n(`cancelOperation/${operationId}`),
     );
 
-    // 4. Cancel all child operations recursively
+    // 5. Cancel all child operations recursively
+    let childCancellations: Promise<boolean>[] = [];
     if (operation.childOperationIds && operation.childOperationIds.length > 0) {
       log('[cancelOperation] cancelling %d child operations', operation.childOperationIds.length);
-      operation.childOperationIds.forEach((childId) => {
-        this.#get().cancelOperation(childId, 'Parent operation cancelled');
-      });
+      childCancellations = operation.childOperationIds.map((childId) =>
+        this.#get().cancelOperation(childId, 'Parent operation cancelled'),
+      );
     }
+
+    const confirmations = await Promise.all([cancelHandler, ...childCancellations]);
+    const cancellationConfirmed = confirmations.every(Boolean);
+    if (cancellationConfirmed) return true;
+
+    // The native transport may still own resources even though the optimistic
+    // UI transition above marked the operation cancelled. Restore the blocker
+    // so another send cannot mistake an unconfirmed shutdown for an idle chat.
+    this.#set(
+      produce((state: ChatStore) => {
+        const op = state.operations[operationId];
+        if (!op || op.status !== 'cancelled' || op.metadata.cancelReason !== reason) return;
+
+        op.status = 'running';
+        delete op.metadata.cancelReason;
+        delete op.metadata.duration;
+        delete op.metadata.endTime;
+      }),
+      false,
+      n(`cancelOperationFailed/${operationId}`),
+    );
+
+    return false;
   };
 
   failOperation = (
@@ -514,8 +586,11 @@ export class OperationActionsImpl {
       if (filter.groupId !== undefined) {
         matches = matches && op.context.groupId === filter.groupId;
       }
-      if (filter.agentId !== undefined) {
-        matches = matches && op.context.agentId === filter.agentId;
+      if (filter.scope !== undefined) {
+        matches = matches && op.context.scope === filter.scope;
+      }
+      if (filter.isNew !== undefined) {
+        matches = matches && op.context.isNew === filter.isNew;
       }
 
       if (matches) {
@@ -606,12 +681,15 @@ export class OperationActionsImpl {
             }
           }
 
-          // Remove from messageOperationMap
-          const messageEntry = Object.entries(state.messageOperationMap).find(
-            ([, opId]) => opId === operationId,
-          );
-          if (messageEntry) {
-            delete state.messageOperationMap[messageEntry[0]];
+          // Remove EVERY messageOperationMap entry pointing to this opId.
+          // Assistant + tool messages from the same turn often map to the
+          // same operation; the previous `find` + single-delete left
+          // dangling references behind, which `submitHeteroIntervention`
+          // later read back as a stale opId and threw on lookup.
+          for (const [messageId, opId] of Object.entries(state.messageOperationMap)) {
+            if (opId === operationId) {
+              delete state.messageOperationMap[messageId];
+            }
           }
         });
       }),
@@ -642,54 +720,74 @@ export class OperationActionsImpl {
     );
   };
 
-  markUnreadCompleted = (agentId: string, topicId?: string | null): void => {
-    const { activeAgentId, activeTopicId } = this.#get();
+  /**
+   * Mark a topic as having an unread completed generation by persisting
+   * `status: 'unread'`. Skipped when the user is already viewing the topic, or
+   * for the default (no-topic) conversation which has no persisted row.
+   *
+   * The write goes through `updateTopicStatus`, which optimistically patches the
+   * in-memory topic map (so the sidebar dot lights up instantly for the active
+   * agent) and persists fire-and-forget. After it persists we refresh the home
+   * sidebar list so the cross-agent unread badge updates even for agents whose
+   * topics aren't loaded on this client.
+   */
+  markTopicUnread = ({
+    agentId,
+    groupId,
+    topicId,
+  }: {
+    agentId?: string;
+    groupId?: string | null;
+    topicId?: string | null;
+  }): void => {
+    if (!topicId) return;
+    if (this.#get().activeTopicId === topicId) return;
 
-    // Only mark when user is NOT currently viewing this agent/topic
-    const isViewingAgent = activeAgentId === agentId;
-    const isViewingTopic = isViewingAgent && (activeTopicId ?? null) === (topicId ?? null);
-
-    if (!isViewingAgent) {
-      this.#set(
-        produce((state: ChatStore) => {
-          state.unreadCompletedAgentIds.add(agentId);
-        }),
-        false,
-        n(`markUnreadCompleted/agent/${agentId}`),
-      );
-    }
-
-    if (topicId && !isViewingTopic) {
-      this.#set(
-        produce((state: ChatStore) => {
-          state.unreadCompletedTopicIds.add(topicId);
-        }),
-        false,
-        n(`markUnreadCompleted/topic/${topicId}`),
-      );
-    }
+    void this.#get()
+      .updateTopicStatus?.({
+        agentId,
+        groupId: groupId ?? undefined,
+        status: 'unread',
+        topicId,
+      })
+      ?.then(() => {
+        void getHomeStoreState().refreshAgentList?.();
+      });
   };
 
-  clearUnreadCompletedAgent = (agentId: string): void => {
-    if (!this.#get().unreadCompletedAgentIds.has(agentId)) return;
-    this.#set(
-      produce((state: ChatStore) => {
-        state.unreadCompletedAgentIds.delete(agentId);
-      }),
-      false,
-      n(`clearUnreadCompleted/agent/${agentId}`),
-    );
-  };
+  /**
+   * Clear a topic's unread mark by flipping `status: 'unread'` back to 'active'.
+   * Only touches topics currently in the unread state — never stomps a
+   * running / paused / completed status. Invoked when the user opens the topic.
+   */
+  markTopicRead = ({
+    agentId,
+    groupId,
+    topicId,
+  }: {
+    agentId?: string;
+    groupId?: string | null;
+    topicId?: string | null;
+  }): void => {
+    if (!topicId) return;
 
-  clearUnreadCompletedTopic = (topicId: string): void => {
-    if (!this.#get().unreadCompletedTopicIds.has(topicId)) return;
-    this.#set(
-      produce((state: ChatStore) => {
-        state.unreadCompletedTopicIds.delete(topicId);
-      }),
-      false,
-      n(`clearUnreadCompleted/topic/${topicId}`),
-    );
+    const key = topicMapKey({
+      agentId: agentId ?? this.#get().activeAgentId,
+      groupId: groupId ?? this.#get().activeGroupId,
+    });
+    const topic = this.#get().topicDataMap[key]?.items?.find((t) => t.id === topicId);
+    if (topic?.status !== 'unread') return;
+
+    void this.#get()
+      .updateTopicStatus?.({
+        agentId,
+        groupId: groupId ?? undefined,
+        status: 'active',
+        topicId,
+      })
+      ?.then(() => {
+        void getHomeStoreState().refreshAgentList?.();
+      });
   };
   // ━━━ Message Queue Actions ━━━
 
@@ -748,6 +846,33 @@ export class OperationActionsImpl {
 
     log('[drainQueuedMessages] contextKey=%s, drained %d', contextKey, messages.length);
     return messages;
+  };
+
+  moveQueuedMessages = (fromContextKey: string, toContextKey: string): void => {
+    if (fromContextKey === toContextKey) return;
+
+    const queue = this.#get().queuedMessages[fromContextKey];
+    if (!queue || queue.length === 0) return;
+
+    this.#set(
+      produce((state: ChatStore) => {
+        const fromQueue = state.queuedMessages[fromContextKey];
+        if (!fromQueue || fromQueue.length === 0) return;
+
+        const toQueue = state.queuedMessages[toContextKey] ?? [];
+        state.queuedMessages[toContextKey] = [...toQueue, ...fromQueue];
+        state.queuedMessages[fromContextKey] = [];
+      }),
+      false,
+      n(`moveQueuedMessages/${fromContextKey}/${toContextKey}`),
+    );
+
+    log(
+      '[moveQueuedMessages] fromContextKey=%s, toContextKey=%s, moved %d',
+      fromContextKey,
+      toContextKey,
+      queue.length,
+    );
   };
 
   removeQueuedMessage = (contextKey: string, messageId: string): void => {

@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import path from 'node:path';
 
 import { TITLE_BAR_HEIGHT } from '@lobechat/desktop-bridge';
 import { type BrowserWindow, type BrowserWindowConstructorOptions, nativeTheme } from 'electron';
@@ -16,6 +16,8 @@ import {
 } from '../../const/theme';
 
 const logger = createLogger('core:WindowThemeManager');
+
+const MACOS_VIBRANCY = 'sidebar';
 
 interface WindowsThemeConfig {
   backgroundColor: string;
@@ -102,7 +104,7 @@ export class WindowThemeManager {
 
       return {
         trafficLightPosition: { x: 12, y: trafficLightY },
-        vibrancy: 'sidebar',
+        vibrancy: MACOS_VIBRANCY,
         visualEffectState: 'active',
       };
     }
@@ -118,7 +120,7 @@ export class WindowThemeManager {
   private getWindowsConfig(isDarkMode: boolean): WindowsThemeConfig {
     return {
       backgroundColor: isDarkMode ? BACKGROUND_DARK : BACKGROUND_LIGHT,
-      icon: isDev ? join(buildDir, 'icon-dev.ico') : undefined,
+      icon: isDev ? path.join(buildDir, 'icon-dev.ico') : undefined,
       titleBarOverlay: this.getWindowsTitleBarOverlay(isDarkMode),
       titleBarStyle: 'hidden',
     };
@@ -156,6 +158,23 @@ export class WindowThemeManager {
     setTimeout(() => {
       this.applyVisualEffects();
     }, THEME_CHANGE_DELAY);
+  }
+
+  /**
+   * Disable macOS vibrancy while fullscreen so the window remains opaque.
+   */
+  handleFullscreenChange(isFullScreen: boolean): void {
+    if (!isMac || !this.browserWindow || this.browserWindow.isDestroyed()) return;
+
+    logger.debug(
+      `[${this.identifier}] Updating macOS vibrancy for fullscreen state: ${isFullScreen}`,
+    );
+
+    try {
+      this.browserWindow.setVibrancy(isFullScreen ? null : MACOS_VIBRANCY);
+    } catch (error) {
+      logger.error(`[${this.identifier}] Failed to update macOS fullscreen vibrancy:`, error);
+    }
   }
 
   // ==================== Visual Effects ====================

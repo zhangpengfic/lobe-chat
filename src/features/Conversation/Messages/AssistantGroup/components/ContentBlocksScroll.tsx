@@ -1,16 +1,20 @@
 'use client';
 
 import type { UIChatMessage } from '@lobechat/types';
-import { Flexbox, ScrollShadow } from '@lobehub/ui';
+import { Flexbox, ScrollArea } from '@lobehub/ui';
 import { createStaticStyles } from 'antd-style';
-import { memo, type RefObject, useMemo } from 'react';
-
-import type { AssistantContentBlock } from '@/types/index';
+import type { RefObject } from 'react';
+import { memo, useMemo } from 'react';
 
 import { resolveAssistantGroupFromMessages } from '../utils/resolveAssistantGroupFromMessages';
 import ContentBlock from './ContentBlock';
+import type { RenderableAssistantContentBlock } from './types';
 
 const styles = createStaticStyles(({ css }) => ({
+  scrollRoot: css`
+    border-radius: 0;
+    background: transparent;
+  `,
   scrollTask: css`
     max-height: min(50vh, 300px);
   `,
@@ -29,7 +33,7 @@ interface ContentBlocksScrollBaseProps {
 
 interface ContentBlocksScrollFromBlocks extends ContentBlocksScrollBaseProps {
   assistantId: string;
-  blocks: AssistantContentBlock[];
+  blocks: RenderableAssistantContentBlock[];
   messages?: never;
 }
 
@@ -50,7 +54,10 @@ const ContentBlocksScroll = memo<ContentBlocksScrollProps>((props) => {
   const assistantIdFromProps = 'messages' in props ? undefined : props.assistantId;
   const blocksFromProps = 'messages' in props ? undefined : props.blocks;
 
-  const { assistantId, blocks } = useMemo(() => {
+  const { assistantId, blocks } = useMemo<{
+    assistantId: string;
+    blocks: RenderableAssistantContentBlock[];
+  }>(() => {
     if (messagesList !== undefined) {
       return resolveAssistantGroupFromMessages(messagesList);
     }
@@ -61,10 +68,10 @@ const ContentBlocksScroll = memo<ContentBlocksScrollProps>((props) => {
   }, [assistantIdFromProps, blocksFromProps, messagesList]);
 
   const list = (
-    <Flexbox gap={8}>
+    <Flexbox gap={variant === 'workflow' ? 8 : undefined}>
       {blocks.map((block) => (
         <ContentBlock
-          key={block.id}
+          key={block.renderKey ?? block.id}
           {...block}
           assistantId={assistantId}
           disableEditing={disableEditing}
@@ -80,18 +87,35 @@ const ContentBlocksScroll = memo<ContentBlocksScrollProps>((props) => {
   }
 
   const scrollClass = variant === 'task' ? styles.scrollTask : styles.scrollWorkflow;
-  const shadowSize = variant === 'task' ? 8 : 12;
 
   return (
-    <ScrollShadow
-      className={scrollClass}
-      offset={12}
-      ref={scrollRef as RefObject<HTMLDivElement>}
-      size={shadowSize}
-      onScroll={onScroll}
+    <ScrollArea
+      disableContentFit
+      scrollFade
+      className={styles.scrollRoot}
+      contentProps={{
+        style: {
+          color: 'inherit',
+          display: 'block',
+          fontSize: 'inherit',
+          gap: 0,
+          lineHeight: 'inherit',
+          paddingInlineEnd: 12,
+        },
+      }}
+      scrollbarProps={{
+        style: {
+          marginInlineEnd: 2,
+        },
+      }}
+      viewportProps={{
+        className: scrollClass,
+        ref: scrollRef as RefObject<HTMLDivElement>,
+        onScroll,
+      }}
     >
       {body}
-    </ScrollShadow>
+    </ScrollArea>
   );
 });
 

@@ -1,5 +1,12 @@
-import type { ModelPerformance, ModelTokensUsage, ModelUsage } from '@lobechat/types';
+import type {
+  ModelPerformance,
+  ModelReasoning,
+  ModelTokensUsage,
+  ModelUsage,
+} from '@lobechat/types';
 
+import type { ModelPricingContext } from './pricing';
+import type { ModelRuntimeDiagnostics } from './providerDiagnostics';
 import type { MessageToolCall, MessageToolCallChunk } from './toolsCalling';
 
 export type LLMRoleType = 'user' | 'system' | 'assistant' | 'function' | 'tool';
@@ -7,18 +14,22 @@ export type LLMRoleType = 'user' | 'system' | 'assistant' | 'function' | 'tool';
 export type ChatResponseFormat =
   | { type: 'json_object' }
   | {
-    json_schema: {
-      name: string;
-      schema: Record<string, any>;
-      strict?: boolean;
+      json_schema: {
+        name: string;
+        schema: Record<string, any>;
+        strict?: boolean;
+      };
+      type: 'json_schema';
     };
-    type: 'json_schema';
-  };
 
 interface UserMessageContentPartThinking {
   signature: string;
   thinking: string;
   type: 'thinking';
+}
+interface UserMessageContentPartRedactedThinking {
+  data: string;
+  type: 'redacted_thinking';
 }
 interface UserMessageContentPartText {
   text: string;
@@ -37,20 +48,31 @@ interface UserMessageContentPartVideo {
   type: 'video_url';
   video_url: { url: string };
 }
+interface UserMessageContentPartAudio {
+  audio_url: {
+    codec?: string;
+    durationMs?: number;
+    mimeType?: string;
+    url: string;
+  };
+  type: 'audio_url';
+}
 
 export type UserMessageContentPart =
   | UserMessageContentPartText
   | UserMessageContentPartImage
   | UserMessageContentPartVideo
-  | UserMessageContentPartThinking;
+  | UserMessageContentPartAudio
+  | UserMessageContentPartThinking
+  | UserMessageContentPartRedactedThinking;
 
 export interface OpenAIChatMessage {
   content: string | UserMessageContentPart[];
+  model?: string;
   name?: string;
-  reasoning?: {
-    content?: string;
-    duration?: number;
-  };
+  provider?: string;
+  reasoning?: ModelReasoning;
+  reasoning_content?: string;
   role: LLMRoleType;
   tool_call_id?: string;
   tool_calls?: MessageToolCall[];
@@ -61,7 +83,11 @@ export interface OpenAIChatMessage {
  */
 export interface ChatStreamPayload {
   apiMode?: 'chatCompletion' | 'responses';
-  effort?: 'low' | 'medium' | 'high' | 'max';
+  /**
+   * @title Provider deployment name
+   */
+  deploymentName?: string;
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /**
    * Enable context caching
    */
@@ -80,9 +106,9 @@ export interface ChatStreamPayload {
    */
   imageAspectRatio?: string;
   /**
-   * @title Image resolution for image generation (e.g., '512px', '1K', '2K', '4K')
+   * @title Image resolution for image generation (e.g., '512', '1K', '2K', '4K')
    */
-  imageResolution?: '512px' | '1K' | '2K' | '4K';
+  imageResolution?: '512' | '1K' | '2K' | '4K';
   logprobs?: boolean;
   /**
    * @title Maximum length of generated text
@@ -119,12 +145,14 @@ export interface ChatStreamPayload {
    * @default 0
    */
   presence_penalty?: number;
+  preserveThinking?: boolean;
   provider?: string;
   reasoning?: {
     effort?: string;
+    mode?: 'standard' | 'pro';
     summary?: string;
   };
-  reasoning_effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  reasoning_effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   response_format?: ChatResponseFormat;
   responseMode?: 'stream' | 'json';
   /**
@@ -144,7 +172,15 @@ export interface ChatStreamPayload {
    * use for Claude and Gemini
    */
   thinking?: {
-    budget_tokens: number;
+    budget_tokens?: number;
+    /**
+     * Controls whether the summarized reasoning text is returned. Defaults to `omitted` on
+     * Claude Fable 5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, where thinking blocks then
+     * arrive with an empty `thinking` field and no `thinking_delta` events while streaming.
+     * Invalid together with `type: 'disabled'`.
+     * @see https://platform.claude.com/docs/en/build-with-claude/thinking#controlling-thinking-display
+     */
+    display?: 'omitted' | 'summarized';
     type?: 'enabled' | 'disabled' | 'adaptive';
   };
   thinkingBudget?: number;
@@ -171,11 +207,19 @@ export interface ChatStreamPayload {
 export interface ChatMethodOptions {
   callback?: ChatStreamCallbacks;
   /**
+   * Request-scoped provider-boundary evidence retained by the caller.
+   * Keep this separate from metadata because routing hooks may retain metadata
+   * after the provider returns, while diagnostics can contain a large payload.
+   */
+  diagnostics?: ModelRuntimeDiagnostics;
+  /**
    * response headers
    */
   headers?: Record<string, any>;
   /** Metadata passed to hooks (billing, tracing, etc.) */
   metadata?: Record<string, unknown>;
+  /** Request-scoped pricing context for model-bank pricing lookups. */
+  pricingContext?: ModelPricingContext;
   /**
    * send the request to the ai api endpoint
    */
@@ -221,12 +265,36 @@ export interface ChatCompletionTool {
 
 export interface OnFinishData {
   error?: any;
+  /**
+   * The terminal finishReason emitted by the provider in the `stop` SSE chunk
+   * (e.g. Google: STOP / SAFETY / RECITATION / MAX_TOKENS; OpenAI: stop / length;
+   * Anthropic: end_turn / max_tokens / tool_use). Used to detect "soft interrupts"
+   * where the provider returns empty content with a non-normal finishReason.
+   */
+  finishReason?: string;
   grounding?: any;
+  reasoning?: ModelReasoning;
   speed?: ModelPerformance;
   text: string;
   thinking?: string;
   toolsCalling?: MessageToolCall[];
   usage?: ModelUsage;
+  usageMissingDiagnostics?: UsageMissingDiagnostics;
+}
+
+export interface UsageMissingDiagnostics {
+  apiMode?: 'chat_completions' | 'messages' | 'responses';
+  chunkIndex?: number;
+  finishReason?: string | null;
+  hasUsageMetadata: boolean;
+  includeUsageRequested?: boolean;
+  model?: string;
+  provider?: string;
+  responseId?: string;
+  source:
+    'anthropic_messages' | 'google_generative_ai' | 'openai_chat_completions' | 'openai_responses';
+  terminalEventType: string;
+  terminalStatus?: string;
 }
 
 /**

@@ -5,6 +5,7 @@ import { memo, useCallback } from 'react';
 import PromptTransformAction from '@/features/PromptTransform/PromptTransformAction';
 
 import { useChatInputStore } from '../../store';
+import { ChatInputAction } from '../components/ChatInputAction';
 
 const PromptTransform = memo(() => {
   const [editor, markdownContent] = useChatInputStore((s) => [s.editor, s.markdownContent]);
@@ -12,13 +13,20 @@ const PromptTransform = memo(() => {
   const onPromptChange = useCallback(
     (prompt: string) => {
       if (!editor) return;
-      editor.setDocument('markdown', prompt);
+      // `keepHistory` prevents setDocument from wiping the undo/redo stacks.
+      editor.setDocument('markdown', prompt, { keepHistory: true });
     },
     [editor],
   );
 
+  // Image mode expands vague inputs; text mode forbids expansion.
   return (
-    <PromptTransformAction mode={'text'} prompt={markdownContent} onPromptChange={onPromptChange} />
+    <PromptTransformAction
+      ActionComponent={ChatInputAction}
+      mode={'image'}
+      prompt={markdownContent}
+      onPromptChange={onPromptChange}
+    />
   );
 });
 

@@ -1,7 +1,6 @@
 'use client';
 
 import { Flexbox } from '@lobehub/ui';
-import { Badge, Card, Skeleton } from 'antd';
 import { createStaticStyles, cssVar } from 'antd-style';
 import {
   Activity,
@@ -18,8 +17,10 @@ import {
 } from 'lucide-react';
 import { memo, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useParams } from 'react-router-dom';
+import { useParams } from 'react-router';
 
+import AsyncError from '@/components/AsyncError';
+import { RouteLoading } from '@/components/Skeleton/RouteSegment';
 import { runSelectors, useEvalStore } from '@/store/eval';
 
 import BenchmarkHeader from './features/BenchmarkHeader';
@@ -53,8 +54,20 @@ const styles = createStaticStyles(({ css }) => ({
   `,
   sectionTitle: css`
     margin: 0;
-    font-size: 16px;
+    font-size: ${cssVar.fontSizeLG};
     font-weight: 600;
+    color: ${cssVar.colorText};
+  `,
+  tag: css`
+    padding-block: 2px;
+    padding-inline: 8px;
+    border: 1px solid ${cssVar.colorBorder};
+    border-radius: ${cssVar.borderRadiusXS};
+
+    font-size: ${cssVar.fontSizeSM};
+    color: ${cssVar.colorTextTertiary};
+
+    background: transparent;
   `,
 }));
 
@@ -77,7 +90,7 @@ const BenchmarkDetail = memo(() => {
   const useFetchRuns = useEvalStore((s) => s.useFetchRuns);
   const runList = useEvalStore(runSelectors.runList);
 
-  useFetchBenchmarkDetail(benchmarkId);
+  const { error, isLoading, mutate } = useFetchBenchmarkDetail(benchmarkId);
   useFetchDatasets(benchmarkId);
 
   const handleRefreshDatasets = useCallback(async () => {
@@ -99,54 +112,10 @@ const BenchmarkDetail = memo(() => {
 
   const totalCases = datasets.reduce((sum, ds) => sum + (ds.testCaseCount || 0), 0);
 
-  if (!benchmark)
-    return (
-      <Flexbox className={styles.container} gap={24} height="100%" width="100%">
-        {/* Header skeleton */}
-        <Flexbox gap={16}>
-          <Flexbox horizontal align="start" gap={12}>
-            <Skeleton.Avatar active shape="square" size={40} style={{ borderRadius: 10 }} />
-            <Flexbox flex={1} gap={8}>
-              <Skeleton.Input active style={{ height: 24, width: 200 }} />
-              <Skeleton.Input active size="small" style={{ height: 14, width: 320 }} />
-            </Flexbox>
-          </Flexbox>
-        </Flexbox>
-
-        {/* Stats cards skeleton */}
-        <Flexbox horizontal gap={12}>
-          {[1, 2, 3, 4].map((i) => (
-            <Card
-              key={i}
-              styles={{ body: { padding: 16 } }}
-              style={{
-                border: `1px solid ${cssVar.colorBorder}`,
-                borderRadius: 8,
-                flex: 1,
-                minWidth: 0,
-              }}
-            >
-              <Flexbox gap={12}>
-                <Flexbox horizontal align="center" gap={8}>
-                  <Skeleton.Avatar active shape="square" size={36} style={{ borderRadius: 8 }} />
-                  <Skeleton.Input active size="small" style={{ height: 13, width: 80 }} />
-                </Flexbox>
-                <Flexbox gap={4}>
-                  <Skeleton.Input active style={{ height: 24, width: 60 }} />
-                  <Skeleton.Input active size="small" style={{ height: 12, width: 100 }} />
-                </Flexbox>
-              </Flexbox>
-            </Card>
-          ))}
-        </Flexbox>
-
-        {/* Section skeletons */}
-        <Skeleton.Input active style={{ height: 16, width: 80 }} />
-        <Skeleton.Input active style={{ height: 64, width: '100%' }} />
-        <Skeleton.Input active style={{ height: 16, width: 80 }} />
-        <Skeleton.Input active style={{ height: 64, width: '100%' }} />
-      </Flexbox>
-    );
+  if (!benchmark) {
+    if (isLoading || !error) return <RouteLoading />;
+    return <AsyncError error={error} variant={'page'} onRetry={() => void mutate()} />;
+  }
 
   return (
     <Flexbox className={styles.container} gap={24} height="100%" width="100%">
@@ -163,19 +132,11 @@ const BenchmarkDetail = memo(() => {
 
       {/* Tags */}
       {(benchmark as any).tags && (benchmark as any).tags.length > 0 && (
-        <Flexbox horizontal gap={6} style={{ flexWrap: 'wrap' }}>
+        <Flexbox horizontal gap={8} style={{ flexWrap: 'wrap' }}>
           {(benchmark as any).tags.map((tag: string) => (
-            <Badge
-              key={tag}
-              style={{
-                backgroundColor: 'transparent',
-                borderColor: 'var(--ant-color-border)',
-                color: 'var(--ant-color-text-tertiary)',
-                fontSize: 12,
-              }}
-            >
+            <span className={styles.tag} key={tag}>
               {tag}
-            </Badge>
+            </span>
           ))}
         </Flexbox>
       )}

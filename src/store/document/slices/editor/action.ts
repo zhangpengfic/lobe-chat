@@ -2,11 +2,15 @@
 
 import type { IEditor } from '@lobehub/editor';
 import type { EditorState as LobehubEditorState } from '@lobehub/editor/react';
+import { toast } from '@lobehub/ui/base-ui';
 import isEqual from 'fast-deep-equal';
+import { t } from 'i18next';
 
 import { EMPTY_EDITOR_STATE } from '@/libs/editor/constants';
+import { isValidEditorData } from '@/libs/editor/isValidEditorData';
 import { documentService } from '@/services/document';
 import type { StoreSetter } from '@/store/types';
+import { composeSkillMarkdown, parseSkillMarkdownFrontmatter } from '@/utils/skillMarkdown';
 import { setNamespace } from '@/utils/storeDebug';
 
 import type { DocumentStore } from '../../store';
@@ -23,6 +27,11 @@ export interface SaveMetadata {
   title?: string;
 }
 
+export interface SaveExecutionOptions {
+  restoreFromHistoryId?: string;
+  saveSource?: 'autosave' | 'manual' | 'restore' | 'system' | 'llm_call';
+}
+
 type Setter = StoreSetter<DocumentStore>;
 export const createEditorSlice = (set: Setter, get: () => DocumentStore, _api?: unknown) =>
   new EditorActionImpl(set, get, _api);
@@ -37,30 +46,44 @@ export class EditorActionImpl {
     this.#get = get;
   }
 
+  private getPersistedMarkdown = (documentId: string | undefined, markdown: string): string => {
+    if (!documentId) return markdown;
+
+    const doc = this.#get().documents[documentId];
+    if (doc?.contentFormat !== 'skillMarkdown') return markdown;
+
+    return composeSkillMarkdown(doc.skillFrontmatter, markdown);
+  };
+
   getEditorContent = (): { editorData: any; markdown: string } | null => {
-    const { editor } = this.#get();
+    const { activeDocumentId, editor } = this.#get();
     if (!editor) return null;
 
     try {
       const markdown = (editor.getDocument('markdown') as unknown as string) || '';
       const editorData = editor.getDocument('json');
-      return { editorData, markdown };
+      return { editorData, markdown: this.getPersistedMarkdown(activeDocumentId, markdown) };
     } catch (error) {
       console.error('[DocumentStore] Failed to get editor content:', error);
       return null;
     }
   };
 
-  handleContentChange = (): void => {
+  private syncEditorContent = (
+    documentId?: string,
+    options: { triggerAutoSave?: boolean } = {},
+  ): boolean => {
     const { editor, activeDocumentId, documents, internal_dispatchDocument } = this.#get();
+    const id = documentId || activeDocumentId;
 
-    if (!editor || !activeDocumentId) return;
+    if (!editor || !id) return false;
 
-    const doc = documents[activeDocumentId];
-    if (!doc) return;
+    const doc = documents[id];
+    if (!doc) return false;
 
     try {
-      const markdown = (editor.getDocument('markdown') as unknown as string) || '';
+      const editorMarkdown = (editor.getDocument('markdown') as unknown as string) || '';
+      const markdown = this.getPersistedMarkdown(id, editorMarkdown);
       const editorData = editor.getDocument('json');
 
       const markdownChanged = markdown !== doc.lastSavedContent;
@@ -69,7 +92,7 @@ export class EditorActionImpl {
 
       internal_dispatchDocument(
         {
-          id: activeDocumentId,
+          id,
           type: 'updateDocument',
           value: { content: markdown, editorData, isDirty: contentChanged },
         },
@@ -77,11 +100,67 @@ export class EditorActionImpl {
       );
 
       // Only trigger auto-save if content actually changed AND autoSave is enabled
-      if (contentChanged && doc.autoSave !== false) {
-        this.#get().triggerDebouncedSave(activeDocumentId);
+      if (options.triggerAutoSave !== false && contentChanged && doc.autoSave !== false) {
+        this.#get().triggerDebouncedSave(id);
       }
+
+      return contentChanged;
     } catch (error) {
       console.error('[DocumentStore] Failed to update content:', error);
+      return false;
+    }
+  };
+
+  commitEditorMutation = async (
+    documentId?: string,
+    options?: SaveExecutionOptions,
+  ): Promise<void> => {
+    const id = documentId || this.#get().activeDocumentId;
+    if (!id) return;
+
+    this.syncEditorContent(id, { triggerAutoSave: false });
+    await this.performSave(id, undefined, options);
+  };
+
+  handleContentChange = (): void => {
+    this.syncEditorContent(undefined, { triggerAutoSave: true });
+  };
+
+  updateSkillFrontmatter = (documentId: string, frontmatter: string): boolean => {
+    const { activeDocumentId, documents, editor, internal_dispatchDocument } = this.#get();
+    const doc = documents[documentId];
+
+    if (!doc || doc.contentFormat !== 'skillMarkdown') return false;
+
+    try {
+      const isActiveDocument = activeDocumentId === documentId;
+      const body =
+        isActiveDocument && editor
+          ? (editor.getDocument('markdown') as unknown as string) || ''
+          : parseSkillMarkdownFrontmatter(doc.content).body;
+      const editorData = isActiveDocument && editor ? editor.getDocument('json') : doc.editorData;
+      const content = composeSkillMarkdown(frontmatter, body);
+      const contentChanged = content !== doc.lastSavedContent;
+      const editorDataChanged = !isEqual(editorData, doc.lastSavedEditorData);
+
+      internal_dispatchDocument(
+        {
+          id: documentId,
+          type: 'updateDocument',
+          value: {
+            content,
+            editorData,
+            isDirty: contentChanged || editorDataChanged,
+            skillFrontmatter: frontmatter,
+          },
+        },
+        'updateSkillFrontmatter',
+      );
+
+      return true;
+    } catch (error) {
+      console.error('[DocumentStore] Failed to update SKILL.md frontmatter:', error);
+      return false;
     }
   };
 
@@ -105,6 +184,49 @@ export class EditorActionImpl {
     internal_dispatchDocument({ id: documentId, type: 'updateDocument', value: { isDirty: true } });
   };
 
+  /**
+   * Apply a snapshot returned by the server-side page-agent tool executor.
+   * The server has already written `documents.content` / `documents.editorData`,
+   * so this only updates in-memory store state to match: clears the dirty flag,
+   * advances `lastSaved*` and refreshes `lastUpdatedTime`. Editor-level Lexical
+   * application is handled by `EditorRuntime.applyServerSnapshot` upstream.
+   */
+  applyServerSnapshot = (
+    documentId: string,
+    snapshot: {
+      content?: string;
+      editorData?: Record<string, unknown>;
+      title?: string;
+    },
+  ): void => {
+    const { documents, internal_dispatchDocument } = this.#get();
+    const doc = documents[documentId];
+    if (!doc) return;
+
+    const value: Record<string, unknown> = {
+      isDirty: false,
+      lastUpdatedTime: new Date(),
+      saveStatus: 'saved',
+    };
+
+    if (typeof snapshot.content === 'string') {
+      value.content = snapshot.content;
+      value.lastSavedContent = snapshot.content;
+    }
+    if (snapshot.editorData && isValidEditorData(snapshot.editorData)) {
+      value.editorData = structuredClone(snapshot.editorData);
+      value.lastSavedEditorData = structuredClone(snapshot.editorData);
+    }
+    if (typeof snapshot.title === 'string') {
+      value.title = snapshot.title;
+    }
+
+    internal_dispatchDocument(
+      { id: documentId, type: 'updateDocument', value: value as Partial<typeof doc> },
+      n('applyServerSnapshot'),
+    );
+  };
+
   onEditorInit = async (editor: IEditor): Promise<void> => {
     const { activeDocumentId, documents } = this.#get();
     if (!editor || !activeDocumentId) return;
@@ -118,6 +240,31 @@ export class EditorActionImpl {
       doc.editorData &&
       typeof doc.editorData === 'object' &&
       Object.keys(doc.editorData).length > 0;
+
+    // SKILL.md frontmatter is metadata, not editable document body. Keep it out of the rich
+    // Markdown editor because `---` fences are otherwise parsed as Markdown dividers/headings,
+    // then stitch the same YAML back into the persisted content during save.
+    if (doc.contentFormat === 'skillMarkdown') {
+      if (hasValidEditorData) {
+        try {
+          editor.setDocument('json', JSON.stringify(doc.editorData));
+          return;
+        } catch {
+          console.warn(
+            '[DocumentStore] Failed to load SKILL.md editorData, falling back to markdown',
+          );
+        }
+      }
+
+      try {
+        editor.setDocument('markdown', parseSkillMarkdownFrontmatter(doc.content).body);
+        this.#set({ editor });
+      } catch (err) {
+        console.error('[DocumentStore] Failed to load SKILL.md content:', err);
+      }
+
+      return;
+    }
 
     // Set content from document state
     if (hasValidEditorData) {
@@ -143,7 +290,11 @@ export class EditorActionImpl {
     this.#set({ editor });
   };
 
-  performSave = async (documentId?: string, metadata?: SaveMetadata): Promise<void> => {
+  performSave = async (
+    documentId?: string,
+    metadata?: SaveMetadata,
+    options?: SaveExecutionOptions,
+  ): Promise<void> => {
     const id = documentId || this.#get().activeDocumentId;
 
     if (!id) return;
@@ -152,46 +303,183 @@ export class EditorActionImpl {
     const doc = documents[id];
     if (!doc || !editor) return;
 
-    // Skip save if no changes
-    if (!doc.isDirty) return;
+    const hasMetadataChanges = metadata?.emoji !== undefined || metadata?.title !== undefined;
+
+    // Skip save if neither document content nor metadata changed
+    if (!doc.isDirty && !hasMetadataChanges) return;
 
     // Update save status
     internal_dispatchDocument({ id, type: 'updateDocument', value: { saveStatus: 'saving' } });
 
     try {
-      const currentContent = (editor.getDocument('markdown') as unknown as string) || '';
+      const currentEditorMarkdown = (editor.getDocument('markdown') as unknown as string) || '';
+      const currentContent = this.getPersistedMarkdown(id, currentEditorMarkdown);
       const currentEditorData = editor.getDocument('json');
 
-      // Save document
-      await documentService.updateDocument({
-        content: currentContent,
-        editorData: JSON.stringify(currentEditorData),
-        id,
-        metadata: metadata?.emoji ? { emoji: metadata.emoji } : undefined,
-        title: metadata?.title,
-      });
+      if (!isValidEditorData(currentEditorData)) {
+        console.warn('[DocumentStore] Refusing to save invalid editorData:', currentEditorData);
+        internal_dispatchDocument({ id, type: 'updateDocument', value: { saveStatus: 'idle' } });
+        return;
+      }
+
+      // Preserve diff nodes (pending review) through the save path.
+      // Normalization only happens when the user explicitly clicks Accept/Reject
+      // in DiffAllToolbar, which mutates editor state before calling performSave.
+      const requestSave = (expectedUpdatedAt?: Date) =>
+        documentService.updateDocument({
+          content: currentContent,
+          editorData: JSON.stringify(currentEditorData),
+          expectedUpdatedAt,
+          id,
+          lockOwnerId: doc.lockOwnerId,
+          metadata: metadata?.emoji ? { emoji: metadata.emoji } : undefined,
+          restoreFromHistoryId: options?.restoreFromHistoryId,
+          saveSource: options?.saveSource,
+          title: metadata?.title,
+        });
+
+      let result: Awaited<ReturnType<typeof requestSave>>;
+      try {
+        result = await requestSave();
+      } catch (error) {
+        // Self-heal only plain content saves: a save carrying title/emoji or a
+        // history restore replays fields the recovery's content+editorData
+        // comparison cannot vouch for (a collaborator's metadata-only change
+        // would be silently overwritten), so those keep the plain CONFLICT flow.
+        if (hasMetadataChanges || options?.restoreFromHistoryId) throw error;
+        result = await this.retrySaveAfterLockReclaim(id, doc, error, requestSave);
+      }
 
       // Mark as clean and update save status
       internal_dispatchDocument({
         id,
         type: 'updateDocument',
         value: {
+          content: currentContent,
           editorData: structuredClone(currentEditorData),
+
           isDirty: false,
           lastSavedContent: currentContent,
           lastSavedEditorData: structuredClone(currentEditorData),
-          lastUpdatedTime: new Date(),
+          lastUpdatedTime: result.savedAt ? new Date(result.savedAt) : new Date(),
+          saveBlockedByLock: false,
           saveStatus: 'saved',
         },
       });
     } catch (error) {
-      console.error('[DocumentStore] Failed to save:', error);
-      internal_dispatchDocument({ id, type: 'updateDocument', value: { saveStatus: 'idle' } });
+      // The server rejects writes to a workspace document another collaborator is
+      // actively editing (CONFLICT). Surface it as a lock block so the editor can
+      // flip to read-only at once instead of silently dropping the edit, and keep
+      // `isDirty` so the unsaved content stays visible to copy out.
+      const errorCode = (error as { data?: { code?: string } })?.data?.code;
+      const lockBlocked = errorCode === 'CONFLICT';
+      // A view-level workspace member has no edit right on this document
+      // (FORBIDDEN). Tell the user instead of silently dropping the edit.
+      if (errorCode === 'FORBIDDEN') {
+        toast.error(t('permission.saveNoEditPermission', { ns: 'setting' }));
+      }
+      if (!lockBlocked) console.error('[DocumentStore] Failed to save:', error);
+      internal_dispatchDocument({
+        id,
+        type: 'updateDocument',
+        value: { saveBlockedByLock: lockBlocked || undefined, saveStatus: 'idle' },
+      });
+    }
+  };
+
+  /**
+   * A CONFLICT save is usually a *self* conflict rather than another member
+   * editing: the debounced autosave racing the lazy first lock acquire, a ghost
+   * lease left behind when a refresh aborted the release request, or another
+   * window of the same user having reclaimed the lease under its own ownerId.
+   * Re-acquiring with our ownerId resolves all of those — the server claims a
+   * missing lease and legitimately reclaims a same-user one — so the save can
+   * be retried once. A lease genuinely held by ANOTHER member comes back as
+   * `lockedByOther`, and the original CONFLICT is rethrown so the existing
+   * `saveBlockedByLock` read-only flow stays intact. Before reclaiming, the
+   * server copy is compared against this session's last-known content so a
+   * collaborator's just-saved-then-released version can never be overwritten
+   * by the retry.
+   */
+  private retrySaveAfterLockReclaim = async <T>(
+    id: string,
+    baseDoc: {
+      lastSavedContent?: string;
+      lastSavedEditorData?: unknown;
+      lockOwnerId?: string;
+    },
+    error: unknown,
+    requestSave: (expectedUpdatedAt?: Date) => Promise<T>,
+  ): Promise<T> => {
+    const errorCode = (error as { data?: { code?: string } })?.data?.code;
+    const lockOwnerId = baseDoc.lockOwnerId;
+    if (errorCode !== 'CONFLICT' || !lockOwnerId) throw error;
+
+    // The rejected lease may have belonged to ANOTHER member who saved and
+    // released it between our failed save and this recovery — reclaiming a
+    // now-free lease alone cannot tell that apart from a self conflict. Only
+    // retry when the server's stored version (content AND editorData) is still
+    // exactly the version THIS request was based on — `baseDoc` is the
+    // immutable store snapshot captured when the failed save started, not the
+    // live store, so an overlapping newer save from this same tab fails the
+    // check instead of being replayed over. The retried save is then pinned to
+    // that verified version via `expectedUpdatedAt`, which the server
+    // re-checks atomically inside the write transaction — a save landing at
+    // any point after this fetch fails the retry instead of being overwritten.
+    // Any mismatch keeps the original CONFLICT flow (read-only + rehydrate,
+    // unsaved content kept for copy-out).
+    let latest: Awaited<ReturnType<typeof documentService.getDocumentById>>;
+    try {
+      latest = await documentService.getDocumentById(id);
+    } catch {
+      throw error;
+    }
+    if (!latest?.updatedAt) throw error;
+    const isKnownVersion =
+      (latest.content ?? '') === (baseDoc.lastSavedContent ?? '') &&
+      isEqual(latest.editorData ?? null, baseDoc.lastSavedEditorData ?? null);
+    if (!isKnownVersion) throw error;
+
+    let lockedByOther: boolean;
+    try {
+      ({ lockedByOther } = await documentService.acquireDocumentLock(id, lockOwnerId));
+    } catch {
+      throw error;
+    }
+    if (lockedByOther) throw error;
+
+    try {
+      return await requestSave(latest.updatedAt);
+    } catch (retryError) {
+      // The reclaim above transferred the lease to this session for a retry
+      // that then failed (e.g. the server-side version predicate caught an
+      // interleaved collaborator save). Keeping the stolen lease would make
+      // the lock recovery read this tab as the legitimate holder and clear
+      // the save block over a stale editor — release it so the lease goes
+      // back to whoever is actually editing.
+      void documentService.releaseDocumentLock(id, lockOwnerId).catch(() => {});
+      throw retryError;
     }
   };
 
   setEditorState = (editorState: LobehubEditorState | undefined): void => {
     this.#set({ editorState }, false, n('setEditorState'));
+  };
+
+  /**
+   * Clear the "save rejected by another member's lock" flag.
+   *
+   * `saveBlockedByLock` is set on a CONFLICT save and otherwise only cleared by a
+   * *successful* save — but a blocked editor is read-only, so it can never reach
+   * that success path on its own. Once the lock is no longer held by someone else
+   * (we hold it, or it's free), the block is stale and must be dropped, or the
+   * user stays stuck read-only behind a banner naming the current holder (which
+   * may now be themselves). Called by the lock driver on that transition.
+   */
+  clearSaveBlockedByLock = (id: string): void => {
+    const { documents, internal_dispatchDocument } = this.#get();
+    if (!documents[id]?.saveBlockedByLock) return;
+    internal_dispatchDocument({ id, type: 'updateDocument', value: { saveBlockedByLock: false } });
   };
 }
 

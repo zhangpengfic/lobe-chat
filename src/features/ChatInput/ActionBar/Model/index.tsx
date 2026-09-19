@@ -1,131 +1,113 @@
-import { LoadingOutlined } from '@ant-design/icons';
-import { ModelIcon } from '@lobehub/icons';
-import { Center, Flexbox } from '@lobehub/ui';
-import { Spin } from 'antd';
-import { createStaticStyles, cx } from 'antd-style';
-import { Settings2Icon } from 'lucide-react';
-import { memo, Suspense, useCallback } from 'react';
+import { Tooltip } from '@lobehub/ui';
+import { memo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import ModelSwitchPanel from '@/features/ModelSwitchPanel';
-import ModelDetailPanel from '@/features/ModelSwitchPanel/components/ModelDetailPanel';
-import { useAgentStore } from '@/store/agent';
-import { agentByIdSelectors } from '@/store/agent/selectors';
 import { aiModelSelectors, useAiInfraStore } from '@/store/aiInfra';
-import { useUserStore } from '@/store/user';
-import { userGeneralSettingsSelectors } from '@/store/user/selectors';
+import { useChatStore } from '@/store/chat';
+import { topicSelectors } from '@/store/chat/slices/topic/selectors';
 
+import SelectorTrigger from '../../components/SelectorTrigger';
 import { useAgentId } from '../../hooks/useAgentId';
-import Action from '../components/Action';
+import { useAgentModelSelection } from '../../hooks/useAgentModelSelection';
+import { useModelLockTooltip } from '../../hooks/useModelLockTooltip';
+import { useReasoningEffortControl } from '../../hooks/useReasoningEffortControl';
 import { useActionBarContext } from '../context';
-
-const styles = createStaticStyles(({ css, cssVar }) => ({
-  container: css`
-    border-radius: 24px;
-    background: ${cssVar.colorFillTertiary};
-  `,
-  icon: cx(
-    'model-switch',
-    css`
-      transition: scale 400ms cubic-bezier(0.215, 0.61, 0.355, 1);
-    `,
-  ),
-  model: css`
-    cursor: pointer;
-    border-radius: 24px;
-
-    :hover {
-      background: ${cssVar.colorFillSecondary};
-    }
-
-    :active {
-      .model-switch {
-        scale: 0.8;
-      }
-    }
-  `,
-  modelWithControl: css`
-    border-radius: 24px;
-
-    :hover {
-      background: ${cssVar.colorFillTertiary};
-    }
-  `,
-}));
+import SelectorMenu from './SelectorMenu';
 
 const ModelSwitch = memo(() => {
   const { t } = useTranslation('chat');
   const { dropdownPlacement } = useActionBarContext();
-  const isDevMode = useUserStore((s) => userGeneralSettingsSelectors.config(s).isDevMode);
-
   const agentId = useAgentId();
-  const [model, provider, updateAgentConfigById] = useAgentStore((s) => [
-    agentByIdSelectors.getAgentModelById(agentId)(s),
-    agentByIdSelectors.getAgentModelProviderById(agentId)(s),
-    s.updateAgentConfigById,
-  ]);
+  const {
+    canDisplayModel,
+    canSelectModel,
+    model: agentModel,
+    provider: agentProvider,
+    selectionLockReason,
+    selectModel,
+  } = useAgentModelSelection(agentId);
+  // Topic-scoped model: a topic pins its own model (top-level `topics.model`
+  // column). Display the topic's pinned model when present, else the agent
+  // default; a switch pins to the active topic, otherwise updates the agent
+  // (via selectModel, which honors workspace member overrides).
+  const activeTopicId = useChatStore((s) => s.activeTopicId);
+  const topicModel = useChatStore(topicSelectors.activeTopicModel);
+  const updateTopicModel = useChatStore((s) => s.updateTopicModel);
+  const model = topicModel?.model ?? agentModel;
+  const provider = topicModel?.model ? topicModel.provider : agentProvider;
 
-  const isModelHasExtendParams = useAiInfraStore(
-    aiModelSelectors.isModelHasExtendParams(model, provider),
-  );
-
-  const showExtendParams = isDevMode && isModelHasExtendParams;
+  const enabledModel = useAiInfraStore(aiModelSelectors.getEnabledModelById(model, provider));
+  const displayName = enabledModel?.displayName || model;
+  const lockTooltip = useModelLockTooltip(displayName, selectionLockReason);
+  // Reasoning effort rides along with the model trigger instead of claiming a
+  // second action slot. Like the model, it pins to the active topic when there
+  // is one and edits the user's per-model default otherwise.
+  const effort = useReasoningEffortControl(model, provider, activeTopicId ?? undefined);
+  // A pinned model still opens the menu when there is an effort to pick there.
+  const interactive = canSelectModel || effort.hasReasoningParams;
 
   const handleModelChange = useCallback(
     async (params: { model: string; provider: string }) => {
-      await updateAgentConfigById(agentId, params);
+      if (!canSelectModel) return;
+
+      if (activeTopicId) await updateTopicModel(activeTopicId, params);
+      else await selectModel(params);
     },
-    [agentId, updateAgentConfigById],
+    [activeTopicId, canSelectModel, selectModel, updateTopicModel],
   );
 
-  return (
-    <Flexbox horizontal align={'center'} className={showExtendParams ? styles.container : ''}>
-      <ModelSwitchPanel
+  // Both current values on one chip, the way the heterogeneous selector reads:
+  // "GPT-5.6 Sol 中". The effort half is dropped for models without one; the
+  // chip keeps the two halves apart so the effort is never ellipsised away.
+  const effortLabel = effort.effortValue
+    ? t(`reasoningEffort.levels.${effort.effortValue}`)
+    : undefined;
+  const triggerText = effortLabel ? `${displayName} ${effortLabel}` : displayName;
+
+  const trigger = (
+    <SelectorTrigger
+      aria-disabled={!interactive}
+      ariaLabel={triggerText}
+      secondaryText={effortLabel}
+      text={displayName}
+      {...(interactive ? {} : { style: { cursor: 'default' } })}
+    />
+  );
+
+  if (!canDisplayModel) return null;
+
+  // Model + effort in one menu, so the two settings that decide how a turn runs
+  // are picked in the same place (see SelectorMenu).
+  if (effort.hasReasoningParams)
+    return (
+      <SelectorMenu
+        canSelectModel={canSelectModel}
+        displayName={displayName}
+        effort={effort}
         model={model}
-        placement={dropdownPlacement}
+        placement={dropdownPlacement ?? 'topRight'}
         provider={provider}
         onModelChange={handleModelChange}
       >
-        <Center
-          className={cx(styles.model, showExtendParams && styles.modelWithControl)}
-          height={36}
-          width={36}
-        >
-          <div className={styles.icon}>
-            <ModelIcon model={model} size={22} />
-          </div>
-        </Center>
-      </ModelSwitchPanel>
+        {trigger}
+      </SelectorMenu>
+    );
 
-      {showExtendParams && (
-        <Action
-          icon={Settings2Icon}
-          showTooltip={false}
-          style={{ borderRadius: 24, marginInlineStart: -4 }}
-          title={t('extendParams.title')}
-          popover={{
-            content: (
-              <Suspense
-                fallback={
-                  <Flexbox
-                    align={'center'}
-                    justify={'center'}
-                    style={{ minHeight: 100, width: '100%' }}
-                  >
-                    <Spin indicator={<LoadingOutlined spin />} />
-                  </Flexbox>
-                }
-              >
-                <ModelDetailPanel model={model} provider={provider} />
-              </Suspense>
-            ),
-            maxWidth: 400,
-            minWidth: 400,
-            placement: 'topLeft',
-          }}
-        />
-      )}
-    </Flexbox>
+  // Locked: say which model is pinned AND why it can't be changed here — the
+  // bare model name used to leave the inert chip unexplained.
+  if (!canSelectModel) return <Tooltip title={lockTooltip ?? displayName}>{trigger}</Tooltip>;
+
+  return (
+    <ModelSwitchPanel
+      model={model}
+      openOnHover={false}
+      placement={dropdownPlacement ?? 'topRight'}
+      provider={provider}
+      onModelChange={handleModelChange}
+    >
+      {trigger}
+    </ModelSwitchPanel>
   );
 });
 

@@ -1,3 +1,5 @@
+import { CUSTOM_DOCUMENT_FILE_TYPE, DERIVED_DOCUMENT_SOURCE_TYPE } from '@lobechat/const';
+
 import { type FileListItem, type KnowledgeItemStatus } from '@/types/files';
 import {
   type CreateResourceParams,
@@ -21,6 +23,7 @@ const mapToResourceItem = (item: FileListItem): ResourceItem => {
     chunkingStatus: item.chunkingStatus,
     // Document-specific fields
     content: item.content,
+    contentPreview: item.contentPreview,
 
     createdAt: item.createdAt,
 
@@ -31,6 +34,8 @@ const mapToResourceItem = (item: FileListItem): ResourceItem => {
     embeddingStatus: item.embeddingStatus,
 
     embeddingTaskId: item.embeddingStatus ? 'placeholder' : null,
+
+    fileId: item.fileId,
 
     fileType: item.fileType,
 
@@ -53,8 +58,14 @@ const mapToResourceItem = (item: FileListItem): ResourceItem => {
 
     updatedAt: item.updatedAt,
 
+    uploader: item.uploader ?? null,
+
     // File-specific fields
     url: item.url,
+
+    userId: item.userId,
+
+    visibility: item.visibility,
   };
 };
 
@@ -99,6 +110,7 @@ export class ResourceService {
     // Map frontend parameter names to backend parameter names
     const backendParams = {
       ...params,
+      includeContentPreview: params.includeContentPreview ?? false,
       knowledgeBaseId: params.libraryId, // Map libraryId to knowledgeBaseId
       libraryId: undefined, // Remove the frontend-specific parameter
     };
@@ -124,9 +136,13 @@ export class ResourceService {
     return fileService.resolveKnowledgeItemIds(backendParams);
   }
 
-  async deleteResourcesByQuery(params: ResourceQueryParams): Promise<{ count: number }> {
+  async deleteResourcesByQuery(
+    params: ResourceQueryParams,
+    excludedIds?: string[],
+  ): Promise<{ count: number }> {
     const backendParams = {
       ...params,
+      excludedIds,
       knowledgeBaseId: params.libraryId,
       libraryId: undefined,
     };
@@ -196,14 +212,14 @@ export class ResourceService {
           typeof created.editorData === 'string'
             ? JSON.parse(created.editorData)
             : created.editorData,
-        fileType: created.fileType || 'custom/document',
+        fileType: created.fileType || CUSTOM_DOCUMENT_FILE_TYPE,
         id: created.id,
         metadata: created.metadata || undefined,
         name: created.title || 'Untitled',
         parentId: created.parentId,
         size: created.totalCharCount || 0,
         slug: created.slug || undefined,
-        sourceType: 'document',
+        sourceType: DERIVED_DOCUMENT_SOURCE_TYPE,
         title: created.title || undefined,
         updatedAt: created.updatedAt ? new Date(created.updatedAt) : new Date(),
         url: created.source || '',

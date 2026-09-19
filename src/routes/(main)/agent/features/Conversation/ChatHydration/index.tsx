@@ -1,40 +1,34 @@
 'use client';
 
-import { memo, useLayoutEffect } from 'react';
-import { createStoreUpdater } from 'zustand-utils';
+import { type FC, memo } from 'react';
+import { useParams } from 'react-router';
 
-import { useQueryState } from '@/hooks/useQueryParam';
+import { useClearActiveTopicUnread } from '@/features/Conversation/hooks';
+import { useTopicCommentDeepLink } from '@/features/TopicComment/useTopicCommentDeepLink';
 import { useChatStore } from '@/store/chat';
+import { topicSelectors } from '@/store/chat/selectors';
+
+import { useChatRouteSync } from './useChatRouteSync';
 
 // sync outside state to useChatStore
-const ChatHydration = memo(() => {
-  const useStoreUpdater = createStoreUpdater(useChatStore);
+interface ChatHydrationProps {
+  getConversationPath?: (agentId: string) => string;
+  getTopicPath?: (agentId: string, topicId: string) => string;
+}
 
-  // two-way bindings the topic params to chat store
-  const [topic, setTopic] = useQueryState('topic', { history: 'replace', throttleMs: 500 });
-  const [thread, setThread] = useQueryState('thread', { history: 'replace', throttleMs: 500 });
-  useStoreUpdater('activeTopicId', topic!);
-  useStoreUpdater('activeThreadId', thread!);
+const ChatHydration: FC<ChatHydrationProps> = memo(({ getConversationPath, getTopicPath }) => {
+  const params = useParams<{ aid?: string; topicId?: string }>();
+  const routeTopicId = params.topicId;
+  const activeAgentId = useChatStore((s) => s.activeAgentId);
+  const topicMetadata = useChatStore((s) =>
+    routeTopicId ? topicSelectors.getTopicById(routeTopicId)(s)?.metadata : undefined,
+  );
+  const useFetchTopicLinkedPullRequest = useChatStore((s) => s.useFetchTopicLinkedPullRequest);
 
-  useLayoutEffect(() => {
-    const unsubscribeTopic = useChatStore.subscribe(
-      (s) => s.activeTopicId,
-      (state) => {
-        setTopic(!state ? null : state);
-      },
-    );
-    const unsubscribeThread = useChatStore.subscribe(
-      (s) => s.activeThreadId,
-      (state) => {
-        setThread(!state ? null : state);
-      },
-    );
-
-    return () => {
-      unsubscribeTopic();
-      unsubscribeThread();
-    };
-  }, [setTopic, setThread]); // ✅ Now setValue is stable and can be safely added to the dependency array
+  useClearActiveTopicUnread();
+  useFetchTopicLinkedPullRequest(activeAgentId ? routeTopicId : undefined, topicMetadata);
+  useTopicCommentDeepLink(routeTopicId);
+  useChatRouteSync({ getConversationPath, getTopicPath });
 
   return null;
 });

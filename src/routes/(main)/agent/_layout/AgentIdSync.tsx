@@ -1,55 +1,38 @@
-import { useMount, usePrevious, useUnmount } from 'ahooks';
-import { useEffect, useRef } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
-import { createStoreUpdater } from 'zustand-utils';
+import { useEffect } from 'react';
+import { useLocation, useParams, useSearchParams } from 'react-router';
 
-import { useAgentStore } from '@/store/agent';
-import { useChatStore } from '@/store/chat';
+import { useResolvedAgentRouteId } from '@/features/AgentRoute/useResolvedAgentRouteId';
+import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
+import { useInitAgentConfig } from '@/hooks/useInitAgentConfig';
+
+import { useAgentIdStoreSync } from './useAgentIdStoreSync';
 
 const AgentIdSync = () => {
-  const useStoreUpdater = createStoreUpdater(useAgentStore);
-  const useChatStoreUpdater = createStoreUpdater(useChatStore);
-  const params = useParams<{ aid?: string }>();
+  const params = useParams<{ aid?: string; topicId?: string }>();
   const [searchParams] = useSearchParams();
-  const searchParamsRef = useRef(searchParams);
-  searchParamsRef.current = searchParams;
-  const prevAgentId = usePrevious(params.aid);
+  const navigate = useWorkspaceAwareNavigate();
+  const location = useLocation();
+  const { agentId: activeId, isSlugRoute, resolvedAgentId } = useResolvedAgentRouteId(params.aid);
 
-  useStoreUpdater('activeAgentId', params.aid);
-  useChatStoreUpdater('activeAgentId', params.aid ?? '');
+  // Hydrate from the route-owning component. Parent layouts can retain stale
+  // params while sibling navigation changes the active agent, which leaves
+  // agents absent from the regular sidebar list (for example project
+  // coordinators) without a config and renders an empty conversation.
+  useInitAgentConfig(activeId);
 
-  // Reset activeTopicId when switching to a different agent
-  // This prevents messages from being saved to the wrong topic bucket
+  // Redirect slug URL to real agent ID URL, preserving child path and query string
   useEffect(() => {
-    // Only reset topic when switching between agents (not on initial mount)
-    if (prevAgentId !== undefined && prevAgentId !== params.aid) {
-      useChatStore.getState().clearPortalStack();
-
-      // Preserve topic if the URL already carries one (e.g. tab navigation)
-      const topicFromUrl = searchParamsRef.current.get('topic');
-
-      if (!topicFromUrl) {
-        useChatStore.getState().switchTopic(null, { skipRefreshMessage: true });
-      }
+    if (isSlugRoute && resolvedAgentId) {
+      const suffix = location.pathname.replace(`/agent/${params.aid}`, '');
+      const qs = searchParams.toString();
+      navigate(`/agent/${resolvedAgentId}${suffix}${qs ? `?${qs}` : ''}`, { replace: true });
     }
-    // Clear unread completion indicator for the agent being viewed
-    if (params.aid) {
-      useChatStore.getState().clearUnreadCompletedAgent(params.aid);
-    }
-  }, [params.aid, prevAgentId]);
+  }, [isSlugRoute, resolvedAgentId, navigate, searchParams, location.pathname, params.aid]);
 
-  useMount(() => {
-    useChatStore.setState({ activeAgentId: params.aid }, false, 'AgentIdSync/mountAgentId');
-  });
-
-  // Clear activeAgentId when unmounting (leaving chat page)
-  useUnmount(() => {
-    useAgentStore.setState({ activeAgentId: undefined }, false, 'AgentIdSync/unmountAgentId');
-    useChatStore.setState(
-      { activeAgentId: undefined, activeTopicId: undefined },
-      false,
-      'AgentIdSync/unmountAgentId',
-    );
+  useAgentIdStoreSync({
+    activeId,
+    topicFromPath: params.topicId,
+    topicFromQuery: searchParams.get('topic'),
   });
 
   return null;

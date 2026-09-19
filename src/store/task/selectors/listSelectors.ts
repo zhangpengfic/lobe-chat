@@ -7,7 +7,7 @@ const taskListTotal = (s: TaskStoreState) => s.tasksTotal;
 
 const isTaskListInit = (s: TaskStoreState) => s.isTaskListInit;
 
-const viewMode = (s: TaskStoreState) => s.viewMode;
+const listVisibility = (s: TaskStoreState) => s.listVisibility;
 
 const statusDisplayMap: Record<string, string> = {
   backlog: 'Backlog',
@@ -16,6 +16,7 @@ const statusDisplayMap: Record<string, string> = {
   failed: 'Needs input',
   paused: 'Needs input',
   running: 'In progress',
+  scheduled: 'Scheduled',
 };
 
 const getDisplayStatus = (status: string): string => statusDisplayMap[status] ?? status;
@@ -46,11 +47,11 @@ export const taskListSelectors = {
   isListEmpty,
   isTaskGroupListInit,
   isTaskListInit,
+  listVisibility,
   needsInputTasks,
   runningTasks,
   taskGroupByKey,
   taskGroups,
   taskList,
   taskListTotal,
-  viewMode,
 };

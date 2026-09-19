@@ -1,7 +1,10 @@
 import { useToolRenderCapabilities } from '@lobechat/shared-tool-ui';
 import type { ChatMessagePluginError } from '@lobechat/types';
-import { Flexbox, Skeleton } from '@lobehub/ui';
+import { Block, Empty, Flexbox } from '@lobehub/ui';
+import { Skeleton } from '@lobehub/ui/base-ui';
+import { SearchIcon } from 'lucide-react';
 import { memo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import FileItem from '../../components/FileItem';
 
@@ -13,21 +16,30 @@ interface SearchFilesProps {
 
 const SearchFiles = memo<SearchFilesProps>(({ searchResults = [], messageId }) => {
   const { isLoading } = useToolRenderCapabilities();
+  const { t } = useTranslation('tool');
   const loading = isLoading?.(messageId);
 
   if (loading) {
     return (
       <Flexbox gap={4}>
-        <Skeleton.Button active block style={{ height: 16 }} />
-        <Skeleton.Button active block style={{ height: 16 }} />
-        <Skeleton.Button active block style={{ height: 16 }} />
-        <Skeleton.Button active block style={{ height: 16 }} />
+        <Skeleton height={16} />
+        <Skeleton height={16} />
+        <Skeleton height={16} />
+        <Skeleton height={16} />
       </Flexbox>
     );
   }
 
+  if (searchResults.length === 0) {
+    return (
+      <Block variant={'outlined'}>
+        <Empty description={t('search.emptyResult')} icon={SearchIcon} />
+      </Block>
+    );
+  }
+
   return (
-    <Flexbox gap={2} style={{ maxHeight: 140, overflow: 'scroll' }}>
+    <Flexbox gap={2} style={{ maxHeight: 220, overflow: 'auto' }}>
       {searchResults.map((item) => (
         <FileItem key={item.path} {...item} />
       ))}

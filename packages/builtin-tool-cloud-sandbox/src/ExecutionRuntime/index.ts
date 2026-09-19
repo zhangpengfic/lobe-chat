@@ -1,3 +1,4 @@
+import { formatSandboxRecreation } from '@lobechat/prompts/fileSystem';
 import { ComputerRuntime } from '@lobechat/tool-runtime';
 import type { BuiltinServerRuntimeOutput } from '@lobechat/types';
 
@@ -18,7 +19,7 @@ import type {
  *
  * Dependency Injection:
  * - Client: Inject codeInterpreterService (uses tRPC client)
- * - Server: Inject ServerSandboxService (uses MarketSDK directly)
+ * - Server: Inject configured sandbox provider (Market, Onlyboxes, etc.)
  */
 export class CloudSandboxExecutionRuntime extends ComputerRuntime {
   private sandboxService: ISandboxService;
@@ -46,6 +47,7 @@ export class CloudSandboxExecutionRuntime extends ComputerRuntime {
       });
 
       const state: ExecuteCodeState = {
+        ...(result.sessionExpiredAndRecreated && { sessionExpiredAndRecreated: true }),
         error: result.result?.error,
         exitCode: result.result?.exitCode,
         language,
@@ -56,14 +58,20 @@ export class CloudSandboxExecutionRuntime extends ComputerRuntime {
 
       if (!result.success) {
         return {
-          content: result.error?.message || JSON.stringify(result.error),
+          content: formatSandboxRecreation(
+            result.error?.message || JSON.stringify(result.error),
+            result.sessionExpiredAndRecreated,
+          ),
           state,
           success: true,
         };
       }
 
       return {
-        content: JSON.stringify(result.result),
+        content: formatSandboxRecreation(
+          JSON.stringify(result.result),
+          result.sessionExpiredAndRecreated,
+        ),
         state,
         success: true,
       };

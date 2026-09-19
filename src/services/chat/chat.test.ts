@@ -1,23 +1,55 @@
 import { AgentBuilderIdentifier } from '@lobechat/builtin-tool-agent-builder';
 import { WebBrowsingManifest } from '@lobechat/builtin-tool-web-browsing';
-import { type ChatStreamPayload, type LobeTool, type UIChatMessage } from '@lobechat/types';
-import { ChatErrorType } from '@lobechat/types';
+import { REQUEST_TRIGGER_HEADER } from '@lobechat/const';
+import { createMediaFileRef } from '@lobechat/const/mediaRef';
+import type { ChatStreamPayload, LobeTool, UIChatMessage } from '@lobechat/types';
+import { ChatErrorType, RequestTrigger } from '@lobechat/types';
 import { act } from '@testing-library/react';
+import { type EnabledAiModel, ModelProvider } from 'model-bank';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_AGENT_CONFIG } from '@/const/settings';
+import { isCanUseFC } from '@/helpers/isCanUseFC';
 import * as toolEngineeringModule from '@/helpers/toolEngineering';
 import { agentDocumentService } from '@/services/agentDocument';
 import { useAgentStore } from '@/store/agent';
 import { agentSelectors, chatConfigByIdSelectors } from '@/store/agent/selectors';
-import { aiModelSelectors } from '@/store/aiInfra';
+import { aiModelSelectors, useAiInfraStore } from '@/store/aiInfra';
 import { useChatStore } from '@/store/chat';
 import { useToolStore } from '@/store/tool';
+import { useUserStore } from '@/store/user';
 import { settingsSelectors } from '@/store/user/selectors';
 
+import * as chatHelper from './helper';
 import { chatService } from './index';
 import * as mechaModule from './mecha';
 import { type ResolvedAgentConfig } from './mecha';
+
+vi.hoisted(() => {
+  const storage = new Map<string, string>();
+
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      clear: () => storage.clear(),
+      getItem: (key: string) => storage.get(key) ?? null,
+      key: (index: number) => Array.from(storage.keys())[index] ?? null,
+      get length() {
+        return storage.size;
+      },
+      removeItem: (key: string) => {
+        storage.delete(key);
+      },
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+    },
+  });
+});
+
+const mockCreateHeaderWithAuth = vi.hoisted(() =>
+  vi.fn(async ({ headers }: { headers: Record<string, string> }) => headers),
+);
 
 // Helper to compute expected date content from SystemDateProvider
 const getCurrentDateContent = () => {
@@ -53,7 +85,6 @@ const createMockResolvedConfig = (overrides?: {
     },
     chatConfig: {
       searchMode: 'off',
-      autoCreateTopicThreshold: 2,
       ...overrides?.chatConfig,
     },
     enabledManifests: overrides?.enabledManifests ?? [],
@@ -68,6 +99,14 @@ vi.mock('i18next', () => ({
   t: vi.fn((key) => `translated_${key}`),
 }));
 
+// 默认设置 isServerMode 为 false
+vi.mock(import('@/const/version'), async (importOriginal) => ({
+  ...(await importOriginal()),
+  isServerMode: false,
+  isDeprecatedEdition: true,
+  isDesktop: false,
+}));
+
 vi.stubGlobal(
   'fetch',
   vi.fn(() => Promise.resolve(new Response(JSON.stringify({ some: 'data' })))),
@@ -78,6 +117,13 @@ vi.mock('@lobechat/fetch-sse', async (importOriginal) => {
   const module = await importOriginal();
 
   return { ...(module as any), getMessageError: vi.fn() };
+});
+vi.mock('@lobechat/fetch-sse', async (importOriginal) => {
+  const module = await importOriginal();
+  return {
+    ...(module as any),
+    fetchSSE: vi.fn(),
+  };
 });
 vi.mock('@lobechat/utils/url', () => ({
   isDesktopLocalStaticServerUrl: vi.fn(),
@@ -99,12 +145,9 @@ beforeEach(async () => {
   // 清除所有模块的缓存
   vi.resetModules();
 
-  // 默认设置 isServerMode 为 false
-  vi.mock('@/const/version', () => ({
-    isServerMode: false,
-    isDeprecatedEdition: true,
-    isDesktop: false,
-  }));
+  // Vitest 5 keeps the module-mock factory instance across `vi.resetModules()`, so a
+  // `mockReturnValue` set inside a test leaks into every later test; restore the default.
+  vi.mocked(isCanUseFC).mockReturnValue(true);
 
   // Default mock for agentSelectors - resolveAgentConfig needs these
   vi.spyOn(agentSelectors, 'getAgentConfigById').mockReturnValue(
@@ -118,12 +161,13 @@ beforeEach(async () => {
     () => ({ searchMode: 'off' }) as any,
   );
   useAgentStore.setState({ activeAgentId: undefined, agentDocumentsMap: {} } as any);
+  useAiInfraStore.setState({ enabledAiModels: [] });
   useChatStore.setState({ activeAgentId: undefined } as any);
 });
 
 // mock auth
 vi.mock('../_auth', () => ({
-  createHeaderWithAuth: vi.fn().mockResolvedValue({}),
+  createHeaderWithAuth: mockCreateHeaderWithAuth,
 }));
 
 // Mock isCanUseFC to control function calling behavior in tests
@@ -168,6 +212,34 @@ describe('ChatService', () => {
           messages: expect.anything(),
         }),
         expect.anything(),
+      );
+    });
+
+    it('should pass chat mode to context engineering when the selected model lacks function calling', async () => {
+      const contextEngineeringSpy = vi
+        .spyOn(mechaModule, 'contextEngineering')
+        .mockResolvedValue([]);
+      vi.mocked(isCanUseFC).mockReturnValue(false);
+      const messages = [{ content: 'Hello', role: 'user' }] as UIChatMessage[];
+
+      await chatService.createAssistantMessage({
+        model: 'gemini-3.1-flash-lite-image',
+        messages,
+        provider: ModelProvider.LobeHub,
+        resolvedAgentConfig: createMockResolvedConfig({
+          agentConfig: {
+            model: 'gemini-3.1-flash-lite-image',
+            provider: ModelProvider.LobeHub,
+          },
+          chatConfig: { enableAgentMode: true },
+        }),
+      });
+
+      expect(isCanUseFC).toHaveBeenCalledWith('gemini-3.1-flash-lite-image', ModelProvider.LobeHub);
+      expect(contextEngineeringSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          enableAgentMode: false,
+        }),
       );
     });
 
@@ -443,6 +515,11 @@ describe('ChatService', () => {
         // Mock aiModelSelectors for extend params support
         vi.spyOn(aiModelSelectors, 'isModelHasExtendParams').mockReturnValue(() => true);
         vi.spyOn(aiModelSelectors, 'modelExtendParams').mockReturnValue(() => ['reasoningEffort']);
+        // The user-level model-instance config supplies the effort; the legacy
+        // agent chatConfig value below must be ignored by the resolver
+        vi.spyOn(aiModelSelectors, 'modelReasoningConfig').mockReturnValue(() => ({
+          reasoningEffort: 'high',
+        }));
 
         await chatService.createAssistantMessage({
           messages,
@@ -450,13 +527,145 @@ describe('ChatService', () => {
           provider: 'test-provider',
           resolvedAgentConfig: createMockResolvedConfig({
             agentConfig: { model: 'test-model', provider: 'test-provider' },
-            chatConfig: { reasoningEffort: 'high' },
+            chatConfig: { reasoningEffort: 'low' },
           }),
         });
 
         expect(getChatCompletionSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             reasoning_effort: 'high',
+          }),
+          expect.anything(),
+        );
+      });
+
+      it('should map DeepSeek reasoning effort to enabled thinking', async () => {
+        const getChatCompletionSpy = vi.spyOn(chatService, 'getChatCompletion');
+        const messages = [
+          { content: 'Test DeepSeek reasoning effort', role: 'user' },
+        ] as UIChatMessage[];
+
+        vi.spyOn(aiModelSelectors, 'isModelHasExtendParams').mockReturnValue(() => true);
+        vi.spyOn(aiModelSelectors, 'modelExtendParams').mockReturnValue(() => [
+          'deepseekV4ReasoningEffort',
+        ]);
+        // Reasoning fields are user-level model-instance settings now — agent
+        // chatConfig values are ignored by the resolver
+        vi.spyOn(aiModelSelectors, 'modelReasoningConfig').mockReturnValue(() => ({
+          deepseekV4ReasoningEffort: 'max',
+        }));
+
+        await chatService.createAssistantMessage({
+          messages,
+          model: 'deepseek-v4-pro',
+          provider: 'deepseek',
+          resolvedAgentConfig: createMockResolvedConfig({
+            agentConfig: { model: 'deepseek-v4-pro', provider: 'deepseek' },
+          }),
+        });
+
+        expect(getChatCompletionSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reasoning_effort: 'max',
+            thinking: {
+              type: 'enabled',
+            },
+          }),
+          expect.anything(),
+        );
+      });
+
+      it('should map DeepSeek reasoning effort none to disabled thinking', async () => {
+        const getChatCompletionSpy = vi.spyOn(chatService, 'getChatCompletion');
+        const messages = [
+          { content: 'Test DeepSeek reasoning disabled', role: 'user' },
+        ] as UIChatMessage[];
+
+        vi.spyOn(aiModelSelectors, 'isModelHasExtendParams').mockReturnValue(() => true);
+        vi.spyOn(aiModelSelectors, 'modelExtendParams').mockReturnValue(() => [
+          'deepseekV4ReasoningEffort',
+        ]);
+        vi.spyOn(aiModelSelectors, 'modelReasoningConfig').mockReturnValue(() => ({
+          deepseekV4ReasoningEffort: 'none',
+        }));
+
+        await chatService.createAssistantMessage({
+          messages,
+          model: 'deepseek-v4-pro',
+          provider: 'deepseek',
+          resolvedAgentConfig: createMockResolvedConfig({
+            agentConfig: { model: 'deepseek-v4-pro', provider: 'deepseek' },
+          }),
+        });
+
+        expect(getChatCompletionSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            thinking: {
+              type: 'disabled',
+            },
+          }),
+          expect.anything(),
+        );
+      });
+
+      it('should map Qwen3.8 Max reasoning effort to enabled thinking', async () => {
+        const getChatCompletionSpy = vi.spyOn(chatService, 'getChatCompletion');
+        const messages = [
+          { content: 'Test Qwen3.8 Max reasoning effort', role: 'user' },
+        ] as UIChatMessage[];
+
+        vi.spyOn(aiModelSelectors, 'isModelHasExtendParams').mockReturnValue(() => true);
+        vi.spyOn(aiModelSelectors, 'modelExtendParams').mockReturnValue(() => [
+          'qwen38ReasoningEffort',
+        ]);
+
+        await chatService.createAssistantMessage({
+          messages,
+          model: 'qwen3.8-max',
+          provider: 'qwen',
+          resolvedAgentConfig: createMockResolvedConfig({
+            agentConfig: { model: 'qwen3.8-max', provider: 'qwen' },
+            chatConfig: { qwen38ReasoningEffort: 'medium' },
+          }),
+        });
+
+        expect(getChatCompletionSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reasoning_effort: 'medium',
+            thinking: {
+              type: 'enabled',
+            },
+          }),
+          expect.anything(),
+        );
+      });
+
+      it('should map Qwen3.8 Max reasoning effort none to disabled thinking', async () => {
+        const getChatCompletionSpy = vi.spyOn(chatService, 'getChatCompletion');
+        const messages = [
+          { content: 'Test Qwen3.8 Max reasoning disabled', role: 'user' },
+        ] as UIChatMessage[];
+
+        vi.spyOn(aiModelSelectors, 'isModelHasExtendParams').mockReturnValue(() => true);
+        vi.spyOn(aiModelSelectors, 'modelExtendParams').mockReturnValue(() => [
+          'qwen38ReasoningEffort',
+        ]);
+
+        await chatService.createAssistantMessage({
+          messages,
+          model: 'qwen3.8-max',
+          provider: 'qwen',
+          resolvedAgentConfig: createMockResolvedConfig({
+            agentConfig: { model: 'qwen3.8-max', provider: 'qwen' },
+            chatConfig: { qwen38ReasoningEffort: 'none' },
+          }),
+        });
+
+        expect(getChatCompletionSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            thinking: {
+              type: 'disabled',
+            },
           }),
           expect.anything(),
         );
@@ -535,7 +744,16 @@ describe('ChatService', () => {
               {
                 content: [
                   {
+                    // NOTE: `vi.spyOn(helpers, 'isCanUseVision').mockReturnValue(true)`
+                    // above does not actually flow through to MessageContentProcessor
+                    // — the capability function reaches the processor via an object
+                    // literal captured in contextEngineering.ts at import time, so the
+                    // spy has no effect on the downstream pipeline. The effective
+                    // behavior is therefore vision=disabled, and the image is
+                    // downgraded to a placeholder (see ).
                     text: `Hello
+
+[image omitted: native vision is not supported. Do not infer or describe the image. If the request depends on it, use an available visual-analysis tool before answering; otherwise state that the image cannot be inspected.]
 
 <!-- SYSTEM CONTEXT (NOT PART OF USER QUERY) -->
 <context.instruction>following part contains context information injected by the system. Please follow these instructions:
@@ -546,7 +764,7 @@ describe('ChatService', () => {
 <files_info>
 <images>
 <images_docstring>here are user upload images you can refer to</images_docstring>
-<image name="abc.png" url="http://example.com/image.jpg"></image>
+<image ref="image_1" name="abc.png" url="http://example.com/image.jpg"></image>
 </images>
 </files_info>
 <!-- END SYSTEM CONTEXT -->`,
@@ -598,6 +816,19 @@ describe('ChatService', () => {
     });
 
     describe('local image URL conversion', () => {
+      beforeEach(() => {
+        useAiInfraStore.setState({
+          enabledAiModels: [
+            {
+              abilities: { vision: true },
+              id: 'gpt-4-vision-preview',
+              providerId: ModelProvider.OpenAI,
+              type: 'chat',
+            } as EnabledAiModel,
+          ],
+        });
+      });
+
       it('should convert local image URLs to base64 and call processImageList', async () => {
         const { imageUrlToBase64 } = await import('@lobechat/utils/imageToBase64');
         const { parseDataUri } = await import('@lobechat/utils/uriParser');
@@ -610,9 +841,6 @@ describe('ChatService', () => {
           base64: 'converted-base64-content',
           mimeType: 'image/png',
         });
-
-        // Mock aiModelSelectors to return true for vision support
-        vi.spyOn(aiModelSelectors, 'isModelSupportVision').mockReturnValue(() => true);
 
         const messages = [
           {
@@ -638,6 +866,7 @@ describe('ChatService', () => {
         await chatService.createAssistantMessage({
           messages,
           model: 'gpt-4-vision-preview',
+          provider: ModelProvider.OpenAI,
           resolvedAgentConfig: createMockResolvedConfig({
             agentConfig: { model: 'gpt-4-vision-preview' },
           }),
@@ -649,6 +878,12 @@ describe('ChatService', () => {
           'http://127.0.0.1:3000/uploads/image.png',
         );
         expect(imageUrlToBase64).toHaveBeenCalledWith('http://127.0.0.1:3000/uploads/image.png');
+
+        const mediaRef = createMediaFileRef({
+          index: 0,
+          messageId: 'test-id',
+          type: 'image',
+        });
 
         // Verify the final result contains base64 converted URL
         expect(getChatCompletionSpy).toHaveBeenCalledWith(
@@ -672,7 +907,7 @@ describe('ChatService', () => {
 <files_info>
 <images>
 <images_docstring>here are user upload images you can refer to</images_docstring>
-<image name="local-image.png" url="http://127.0.0.1:3000/uploads/image.png"></image>
+<image ref="${mediaRef}" name="local-image.png" url="http://127.0.0.1:3000/uploads/image.png"></image>
 </images>
 </files_info>
 <!-- END SYSTEM CONTEXT -->`,
@@ -690,6 +925,7 @@ describe('ChatService', () => {
               },
             ],
             model: 'gpt-4-vision-preview',
+            provider: ModelProvider.OpenAI,
             stream: true,
             enabledSearch: undefined,
             tools: undefined,
@@ -707,9 +943,6 @@ describe('ChatService', () => {
         vi.mocked(parseDataUri).mockReturnValue({ type: 'url', base64: null, mimeType: null });
         vi.mocked(isDesktopLocalStaticServerUrl).mockReturnValue(false); // This is NOT a local URL
         vi.mocked(imageUrlToBase64).mockClear(); // Clear to ensure it's not called
-
-        // Mock aiModelSelectors to return true for vision support
-        vi.spyOn(aiModelSelectors, 'isModelSupportVision').mockReturnValue(() => true);
 
         const messages = [
           {
@@ -734,6 +967,7 @@ describe('ChatService', () => {
         await chatService.createAssistantMessage({
           messages,
           model: 'gpt-4-vision-preview',
+          provider: ModelProvider.OpenAI,
           resolvedAgentConfig: createMockResolvedConfig({
             agentConfig: { model: 'gpt-4-vision-preview' },
           }),
@@ -745,6 +979,12 @@ describe('ChatService', () => {
           'https://example.com/remote-image.jpg',
         );
         expect(imageUrlToBase64).not.toHaveBeenCalled(); // Should NOT be called for remote URLs
+
+        const mediaRef = createMediaFileRef({
+          index: 0,
+          messageId: 'test-id-2',
+          type: 'image',
+        });
 
         // Verify the final result preserves original URL
         expect(getChatCompletionSpy).toHaveBeenCalledWith(
@@ -768,7 +1008,7 @@ describe('ChatService', () => {
 <files_info>
 <images>
 <images_docstring>here are user upload images you can refer to</images_docstring>
-<image name="remote-image.jpg" url="https://example.com/remote-image.jpg"></image>
+<image ref="${mediaRef}" name="remote-image.jpg" url="https://example.com/remote-image.jpg"></image>
 </images>
 </files_info>
 <!-- END SYSTEM CONTEXT -->`,
@@ -783,6 +1023,7 @@ describe('ChatService', () => {
               },
             ],
             model: 'gpt-4-vision-preview',
+            provider: ModelProvider.OpenAI,
             stream: true,
             enabledSearch: undefined,
             tools: undefined,
@@ -809,9 +1050,6 @@ describe('ChatService', () => {
           base64: 'local-file-base64',
           mimeType: 'image/jpeg',
         });
-
-        // Mock aiModelSelectors to return true for vision support
-        vi.spyOn(aiModelSelectors, 'isModelSupportVision').mockReturnValue(() => true);
 
         const messages = [
           {
@@ -845,6 +1083,7 @@ describe('ChatService', () => {
         await chatService.createAssistantMessage({
           messages,
           model: 'gpt-4-vision-preview',
+          provider: ModelProvider.OpenAI,
           resolvedAgentConfig: createMockResolvedConfig({
             agentConfig: { model: 'gpt-4-vision-preview' },
           }),
@@ -1248,7 +1487,7 @@ describe('ChatService', () => {
         );
 
         // Mock AI infra store state
-        vi.spyOn(aiModelSelectors, 'isModelHasBuiltinSearch').mockReturnValueOnce(() => false);
+        vi.spyOn(aiModelSelectors, 'modelBuiltinSearchImpl').mockReturnValueOnce(() => undefined);
         vi.spyOn(aiModelSelectors, 'isModelHasExtendParams').mockReturnValueOnce(() => false);
 
         // Pre-generated tools (from internal_createAgentState)
@@ -1299,8 +1538,8 @@ describe('ChatService', () => {
             }) as any,
         );
 
-        // Mock AI infra store state - model has built-in search
-        vi.spyOn(aiModelSelectors, 'isModelHasBuiltinSearch').mockReturnValueOnce(() => true);
+        // Mock AI infra store state - model has parameter-based built-in search
+        vi.spyOn(aiModelSelectors, 'modelBuiltinSearchImpl').mockReturnValueOnce(() => 'params');
         vi.spyOn(aiModelSelectors, 'isModelHasExtendParams').mockReturnValueOnce(() => false);
 
         // Mock createChatToolsEngine to return tools with web browsing
@@ -1351,7 +1590,7 @@ describe('ChatService', () => {
         );
 
         // Mock AI infra store state
-        vi.spyOn(aiModelSelectors, 'isModelHasBuiltinSearch').mockReturnValueOnce(() => true);
+        vi.spyOn(aiModelSelectors, 'modelBuiltinSearchImpl').mockReturnValueOnce(() => 'params');
         vi.spyOn(aiModelSelectors, 'isModelHasExtendParams').mockReturnValueOnce(() => false);
 
         // Mock createChatToolsEngine to return tools with web browsing
@@ -1462,7 +1701,7 @@ describe('ChatService', () => {
           .spyOn(mechaModule, 'contextEngineering')
           .mockResolvedValue([]);
         vi.spyOn(chatService, 'getChatCompletion').mockResolvedValue(new Response(''));
-        vi.spyOn(agentDocumentService, 'getDocuments').mockResolvedValue([
+        vi.spyOn(agentDocumentService, 'getContextDocuments').mockResolvedValue([
           {
             content: 'Project setup steps',
             filename: 'setup.md',
@@ -1482,7 +1721,9 @@ describe('ChatService', () => {
           resolvedAgentConfig: createMockResolvedConfig(),
         });
 
-        expect(agentDocumentService.getDocuments).toHaveBeenCalledWith({ agentId: 'agent-1' });
+        expect(agentDocumentService.getContextDocuments).toHaveBeenCalledWith({
+          agentId: 'agent-1',
+        });
         expect(contextEngineeringSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             agentDocuments: [
@@ -1501,7 +1742,7 @@ describe('ChatService', () => {
           .spyOn(mechaModule, 'contextEngineering')
           .mockResolvedValue([]);
         vi.spyOn(chatService, 'getChatCompletion').mockResolvedValue(new Response(''));
-        vi.spyOn(agentDocumentService, 'getDocuments').mockResolvedValue([
+        vi.spyOn(agentDocumentService, 'getContextDocuments').mockResolvedValue([
           {
             content: 'Edited agent setup',
             filename: 'builder-target.md',
@@ -1525,7 +1766,9 @@ describe('ChatService', () => {
           }),
         });
 
-        expect(agentDocumentService.getDocuments).toHaveBeenCalledWith({ agentId: 'edited-agent' });
+        expect(agentDocumentService.getContextDocuments).toHaveBeenCalledWith({
+          agentId: 'edited-agent',
+        });
         expect(contextEngineeringSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             agentDocuments: [
@@ -1547,6 +1790,30 @@ describe('ChatService', () => {
       const { fetchSSE } = await import('@lobechat/fetch-sse');
       mockFetchSSE = vi.fn().mockResolvedValue(new Response('mock response'));
       vi.mocked(fetchSSE).mockImplementation(mockFetchSSE);
+      mockCreateHeaderWithAuth.mockClear();
+    });
+
+    it('should preserve the topic ID when using the browser runtime', async () => {
+      vi.spyOn(chatHelper, 'isEnableFetchOnClient').mockReturnValue(true);
+      useUserStore.setState({ isSignedIn: true });
+      const runtime = await import('@lobechat/model-runtime');
+      const chat = vi.fn().mockResolvedValue(new Response('ok'));
+      vi.spyOn(mechaModule, 'initializeWithClientStore').mockResolvedValue(
+        new runtime.ModelRuntime({ chat }),
+      );
+      mockFetchSSE.mockImplementation(
+        async (_url: string, options: { fetcher: () => Promise<Response> }) => options.fetcher(),
+      );
+
+      await chatService.getChatCompletion(
+        { messages: [], model: 'glm-5', provider: ModelProvider.OpenCodeCodingPlan },
+        { topicId: 'topic-browser' },
+      );
+
+      expect(chat).toHaveBeenCalledWith(
+        expect.not.objectContaining({ topicId: expect.anything() }),
+        expect.objectContaining({ metadata: { topicId: 'topic-browser' } }),
+      );
     });
 
     it('should make a POST request with the correct payload', async () => {
@@ -1575,6 +1842,30 @@ describe('ChatService', () => {
       );
     });
 
+    it('should send request trigger as a header without adding it to the model payload', async () => {
+      const params: Partial<ChatStreamPayload> = {
+        messages: [],
+        model: 'test-model',
+      };
+
+      await chatService.getChatCompletion(params, {
+        metadata: { trigger: RequestTrigger.MultimodalAnalysis },
+      });
+
+      expect(mockFetchSSE).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            [REQUEST_TRIGGER_HEADER]: RequestTrigger.MultimodalAnalysis,
+          }),
+        }),
+      );
+
+      const payload = JSON.parse(mockFetchSSE.mock.calls[0][1].body);
+      expect(payload).not.toHaveProperty('requestTrigger');
+      expect(payload).not.toHaveProperty('metadata');
+    });
+
     it('should make a POST request with chatCompletion apiMode in non-openai provider payload', async () => {
       const params: Partial<ChatStreamPayload> = {
         model: 'deepseek-reasoner',
@@ -1601,6 +1892,37 @@ describe('ChatService', () => {
           body: JSON.stringify(expectedPayload),
           headers: expect.any(Object),
           method: 'POST',
+        }),
+      );
+    });
+
+    it('should preserve Azure Responses-only logical model and pass deploymentName separately', async () => {
+      useAiInfraStore.setState({
+        enabledAiModels: [
+          {
+            config: { deploymentName: 'prod-gpt-54' },
+            id: 'gpt-5.4',
+            providerId: ModelProvider.Azure,
+          },
+        ],
+      } as any);
+
+      const params: Partial<ChatStreamPayload> = {
+        messages: [],
+        model: 'gpt-5.4',
+        provider: ModelProvider.Azure,
+      };
+
+      await chatService.getChatCompletion(params, {});
+
+      const payload = JSON.parse(mockFetchSSE.mock.calls[0][1].body);
+
+      expect(payload).toEqual(
+        expect.objectContaining({
+          apiMode: 'chatCompletion',
+          deploymentName: 'prod-gpt-54',
+          messages: [],
+          model: 'gpt-5.4',
         }),
       );
     });
@@ -1649,7 +1971,7 @@ describe('ChatService', () => {
   describe('fetchPresetTaskResult', () => {
     it('should not wait for agent documents on preset task chains', async () => {
       vi.spyOn(chatService, 'getChatCompletion').mockResolvedValue(new Response(''));
-      vi.spyOn(agentDocumentService, 'getDocuments').mockResolvedValue([]);
+      vi.spyOn(agentDocumentService, 'getContextDocuments').mockResolvedValue([]);
 
       await chatService.fetchPresetTaskResult({
         abortController: new AbortController(),
@@ -1660,28 +1982,26 @@ describe('ChatService', () => {
         },
       });
 
-      expect(agentDocumentService.getDocuments).not.toHaveBeenCalled();
+      expect(agentDocumentService.getContextDocuments).not.toHaveBeenCalled();
     });
 
     it('should handle successful chat completion response', async () => {
       // Mock getChatCompletion to simulate successful completion
-      const getChatCompletionSpy = vi
-        .spyOn(chatService, 'getChatCompletion')
-        .mockImplementation(async (params, options) => {
-          // Simulate successful response
-          if (options?.onFinish) {
-            options.onFinish('AI response', {
-              type: 'done',
-              observationId: null,
-              toolCalls: undefined,
-              traceId: null,
-            });
-          }
-          if (options?.onMessageHandle) {
-            options.onMessageHandle({ type: 'text', text: 'AI response' });
-          }
-          return new Response('');
-        });
+      vi.spyOn(chatService, 'getChatCompletion').mockImplementation(async (params, options) => {
+        // Simulate successful response
+        if (options?.onFinish) {
+          options.onFinish('AI response', {
+            type: 'done',
+            observationId: null,
+            toolCalls: undefined,
+            traceId: null,
+          });
+        }
+        if (options?.onMessageHandle) {
+          options.onMessageHandle({ type: 'text', text: 'AI response' });
+        }
+        return new Response('');
+      });
 
       const params = {
         messages: [{ content: 'Hello', role: 'user' as const }],
@@ -1720,15 +2040,13 @@ describe('ChatService', () => {
 
     it('should handle error in chat completion', async () => {
       // Mock getChatCompletion to simulate error
-      const getChatCompletionSpy = vi
-        .spyOn(chatService, 'getChatCompletion')
-        .mockImplementation(async (params, options) => {
-          // Simulate error response
-          if (options?.onErrorHandle) {
-            options.onErrorHandle({ message: 'translated_response.404', type: 404 });
-          }
-          return new Response('');
-        });
+      vi.spyOn(chatService, 'getChatCompletion').mockImplementation(async (params, options) => {
+        // Simulate error response
+        if (options?.onErrorHandle) {
+          options.onErrorHandle({ message: 'translated_response.404', type: 404 });
+        }
+        return new Response('');
+      });
 
       const params = {
         messages: [{ content: 'Hello', role: 'user' as const }],
@@ -1769,13 +2087,6 @@ describe('ChatService private methods', () => {
   describe('getChatCompletion', () => {
     it('should merge responseAnimation styles correctly', async () => {
       const { fetchSSE } = await import('@lobechat/fetch-sse');
-      vi.mock('@lobechat/fetch-sse', async (importOriginal) => {
-        const module = await importOriginal();
-        return {
-          ...(module as any),
-          fetchSSE: vi.fn(),
-        };
-      });
 
       // Mock provider config
       const { aiProviderSelectors } = await import('@/store/aiInfra');
@@ -1868,6 +2179,11 @@ describe('ChatService private methods', () => {
       // Mock aiModelSelectors for extend params support
       vi.spyOn(aiModelSelectors, 'isModelHasExtendParams').mockReturnValue(() => true);
       vi.spyOn(aiModelSelectors, 'modelExtendParams').mockReturnValue(() => ['reasoningEffort']);
+      // The user-level model-instance config supplies the effort; the legacy
+      // agent chatConfig value below must be ignored by the resolver
+      vi.spyOn(aiModelSelectors, 'modelReasoningConfig').mockReturnValue(() => ({
+        reasoningEffort: 'high',
+      }));
 
       await chatService.createAssistantMessage({
         messages,
@@ -1875,7 +2191,7 @@ describe('ChatService private methods', () => {
         provider: 'test-provider',
         resolvedAgentConfig: createMockResolvedConfig({
           agentConfig: { model: 'test-model', provider: 'test-provider' },
-          chatConfig: { reasoningEffort: 'high' },
+          chatConfig: { reasoningEffort: 'low' },
         }),
       });
 

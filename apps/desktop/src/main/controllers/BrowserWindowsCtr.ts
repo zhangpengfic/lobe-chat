@@ -1,4 +1,5 @@
 import type {
+  FocusTopicPopupParams,
   InterceptRouteParams,
   OpenSettingsWindowOptions,
   WindowMinimumSizeParams,
@@ -15,9 +16,19 @@ export default class BrowserWindowsCtr extends ControllerModule {
   static override readonly groupName = 'windows';
 
   @shortcut('showApp')
-  async toggleMainWindow() {
+  toggleMainWindow() {
     const mainWindow = this.app.browserManager.getMainWindow();
     mainWindow.toggleVisible();
+  }
+
+  @shortcut('quickComposer')
+  async openQuickComposer() {
+    await this.app.screenCaptureManager.startSession();
+  }
+
+  @shortcut('quickChat')
+  openQuickChat() {
+    this.app.browserManager.openQuickChatPopup();
   }
 
   @IpcMethod()
@@ -78,6 +89,37 @@ export default class BrowserWindowsCtr extends ControllerModule {
     return this.withSenderIdentifier((identifier) => {
       return this.app.browserManager.isWindowMaximized(identifier);
     });
+  }
+
+  @IpcMethod()
+  isWindowFullScreen() {
+    return this.withSenderIdentifier((identifier) => {
+      return this.app.browserManager.isWindowFullScreen(identifier);
+    });
+  }
+
+  @IpcMethod()
+  setWindowAlwaysOnTop(flag: boolean) {
+    this.withSenderIdentifier((identifier) => {
+      this.app.browserManager.setWindowAlwaysOnTop(identifier, flag);
+    });
+  }
+
+  @IpcMethod()
+  isWindowAlwaysOnTop() {
+    return this.withSenderIdentifier((identifier) => {
+      return this.app.browserManager.isWindowAlwaysOnTop(identifier);
+    });
+  }
+
+  @IpcMethod()
+  listTopicPopups() {
+    return this.app.browserManager.listTopicPopups();
+  }
+
+  @IpcMethod()
+  focusTopicPopup(params: FocusTopicPopupParams) {
+    return this.app.browserManager.focusTopicPopup(params.identifier);
   }
 
   @IpcMethod()
@@ -155,6 +197,7 @@ export default class BrowserWindowsCtr extends ControllerModule {
    */
   @IpcMethod()
   async createMultiInstanceWindow(params: {
+    inheritCurrentWindowSize?: boolean;
     path: string;
     templateId: WindowTemplateIdentifiers;
     uniqueId?: string;
@@ -162,10 +205,20 @@ export default class BrowserWindowsCtr extends ControllerModule {
     try {
       console.info('[BrowserWindowsCtr] Creating multi-instance window:', params);
 
+      const inheritedWindowSize = params.inheritCurrentWindowSize
+        ? this.withSenderIdentifier((identifier) => {
+            const currentBounds = this.app.browserManager.getWindowSize(identifier);
+            if (!currentBounds) return undefined;
+
+            return { height: currentBounds.height, width: currentBounds.width };
+          })
+        : undefined;
+
       const result = this.app.browserManager.createMultiInstanceWindow(
         params.templateId,
         params.path,
         params.uniqueId,
+        inheritedWindowSize,
       );
 
       // Show the window

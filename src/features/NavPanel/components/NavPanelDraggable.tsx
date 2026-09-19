@@ -1,16 +1,21 @@
 'use client';
 
-import { DraggablePanel } from '@lobehub/ui';
+import { DraggablePanel } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cssVar } from 'antd-style';
 import { type ReactNode } from 'react';
 import { memo, Suspense, useMemo, useRef } from 'react';
 
+import NavPanelUpgradeEntry from '@/business/client/features/NavPanelUpgradeEntry';
 import { isDesktop } from '@/const/version';
+import Footer from '@/features/HomeSidebar/Footer';
+import { USER_DROPDOWN_ICON_ID } from '@/features/NavPanel/constants';
 import { TOGGLE_BUTTON_ID } from '@/features/NavPanel/ToggleLeftPanelButton';
-import Footer from '@/routes/(main)/home/_layout/Footer';
-import { USER_DROPDOWN_ICON_ID } from '@/routes/(main)/home/_layout/Header/components/User';
 import { useGlobalStore } from '@/store/global';
-import { systemStatusSelectors } from '@/store/global/selectors';
+import {
+  NAV_PANEL_MAX_WIDTH,
+  NAV_PANEL_MIN_WIDTH,
+  systemStatusSelectors,
+} from '@/store/global/selectors';
 import { isMacOS } from '@/utils/platform';
 
 import { useNavPanelSizeChangeHandler } from '../hooks/useNavPanel';
@@ -106,24 +111,20 @@ const classNames = {
 };
 
 export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }) => {
-  const [expand, togglePanel] = useGlobalStore((s) => [
+  const [expand, togglePanel, isStatusInit] = useGlobalStore((s) => [
     systemStatusSelectors.showLeftPanel(s),
     s.toggleLeftPanel,
+    systemStatusSelectors.isStatusInit(s),
   ]);
   const handleSizeChange = useNavPanelSizeChangeHandler();
 
+  // Defer DraggablePanel mount until system status hydrates; otherwise defaultSize
+  // captures the pre-hydration default and the DOM drifts off NavigationBar's live width.
   const defaultWidthRef = useRef(0);
-  if (defaultWidthRef.current === 0) {
+  if (defaultWidthRef.current === 0 && isStatusInit) {
     defaultWidthRef.current = systemStatusSelectors.leftPanelWidth(useGlobalStore.getState());
   }
 
-  const defaultSize = useMemo(
-    () => ({
-      height: '100%',
-      width: defaultWidthRef.current,
-    }),
-    [],
-  );
   const styles = useMemo(
     () => ({
       background: isDesktop && isMacOS() ? 'transparent' : cssVar.colorBgLayout,
@@ -132,6 +133,13 @@ export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }
     [],
   );
 
+  if (defaultWidthRef.current === 0) {
+    const pendingWidth = systemStatusSelectors.leftPanelWidth(useGlobalStore.getState());
+    return <div aria-hidden style={{ flexShrink: 0, height: '100%', width: pendingWidth }} />;
+  }
+
+  const defaultSize = { height: '100%', width: defaultWidthRef.current };
+
   return (
     <DraggablePanel
       className={draggableStyles.panel}
@@ -139,8 +147,8 @@ export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }
       defaultSize={defaultSize}
       expand={expand}
       expandable={false}
-      maxWidth={400}
-      minWidth={240}
+      maxWidth={NAV_PANEL_MAX_WIDTH}
+      minWidth={NAV_PANEL_MIN_WIDTH}
       placement="left"
       showBorder={false}
       style={styles}
@@ -152,6 +160,9 @@ export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }
           {activeContent.node}
         </div>
       </div>
+      <Suspense fallback={null}>
+        <NavPanelUpgradeEntry />
+      </Suspense>
       <Suspense>
         <Footer />
       </Suspense>

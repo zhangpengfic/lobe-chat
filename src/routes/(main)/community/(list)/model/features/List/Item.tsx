@@ -1,17 +1,19 @@
 'use client';
 
-import { ModelIcon, ProviderIcon } from '@lobehub/icons';
-import { Block, Flexbox, Icon, Popover, Tag, Text } from '@lobehub/ui';
+import { Block, Flexbox, Icon, Popover } from '@lobehub/ui';
+import { Tag, Text } from '@lobehub/ui/base-ui';
 import { createStaticStyles } from 'antd-style';
 import dayjs from 'dayjs';
 import { ClockIcon } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, useNavigate } from 'react-router-dom';
 import urlJoin from 'url-join';
 
+import { ModelIcon, ProviderIcon } from '@/components/LobeIcons';
 import { ModelInfoTags } from '@/components/ModelSelect';
 import PublishedTime from '@/components/PublishedTime';
+import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
+import WorkspaceLink from '@/features/Workspace/WorkspaceLink';
 import { type DiscoverModelItem } from '@/types/discover';
 
 import ModelTypeIcon from './ModelTypeIcon';
@@ -51,9 +53,18 @@ const styles = createStaticStyles(({ css, cssVar }) => {
 });
 
 const ModelItem = memo<DiscoverModelItem>(
-  ({ identifier, displayName, contextWindowTokens, releasedAt, type, abilities, providers }) => {
+  ({
+    description,
+    identifier,
+    displayName,
+    contextWindowTokens,
+    releasedAt,
+    type,
+    abilities,
+    providers,
+  }) => {
     const { t } = useTranslation(['models', 'discover']);
-    const navigate = useNavigate();
+    const navigate = useWorkspaceAwareNavigate();
     const link = urlJoin('/community/model', identifier);
     return (
       <Block
@@ -103,11 +114,11 @@ const ModelItem = memo<DiscoverModelItem>(
                   overflow: 'hidden',
                 }}
               >
-                <Link style={{ color: 'inherit', overflow: 'hidden' }} to={link}>
+                <WorkspaceLink style={{ color: 'inherit', overflow: 'hidden' }} to={link}>
                   <Text ellipsis as={'h2'} className={styles.title}>
                     {displayName}
                   </Text>
-                </Link>
+                </WorkspaceLink>
               </Flexbox>
               <div className={styles.author}>{identifier}</div>
             </Flexbox>
@@ -129,7 +140,7 @@ const ModelItem = memo<DiscoverModelItem>(
               rows: 3,
             }}
           >
-            {t(`${identifier}.description`)}
+            {t(`${identifier}.description`, { defaultValue: description })}
           </Text>
         </Flexbox>
         <Flexbox

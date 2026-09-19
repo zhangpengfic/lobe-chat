@@ -15,7 +15,7 @@ export class MessageTransformer {
    * Convert a Message to AssistantContentBlock
    */
   messageToContentBlock(message: Message): AssistantContentBlock {
-    const { usage, performance } = this.splitMetadata(message.metadata);
+    const { usage, performance } = this.splitMetadata(message.metadata, message.usage);
 
     return {
       content: message.content || '',
@@ -31,16 +31,30 @@ export class MessageTransformer {
   }
 
   /**
-   * Split metadata into usage and performance objects
+   * Split metadata into usage and performance objects.
+   *
+   * Supports two storage shapes:
+   * - **Nested** (canonical): `metadata.usage = {...}`, `metadata.performance = {...}`
+   *   — written by hetero-agent / Gateway executors.
+   * - **Flat** (legacy): `metadata.totalTokens`, `metadata.ttft`, etc — older write paths
+   *   that splatted token fields directly onto metadata.
+   *
+   * Top-level usage takes priority. Nested and flat metadata fields only fill in
+   * missing keys for legacy rows during the migration period.
    */
-  splitMetadata(metadata?: any): {
+  splitMetadata(
+    metadata?: any,
+    topLevelUsage?: ModelUsage,
+  ): {
     performance?: ModelPerformance;
     usage?: ModelUsage;
   } {
-    if (!metadata) return {};
+    if (!metadata && !topLevelUsage) return {};
 
-    const usage: ModelUsage = {};
-    const performance: ModelPerformance = {};
+    const usage: ModelUsage = { ...metadata?.usage, ...topLevelUsage };
+    const performance: ModelPerformance = { ...metadata?.performance };
+    let hasUsage = Object.keys(usage).length > 0;
+    let hasPerformance = Object.keys(performance).length > 0;
 
     const usageFields = [
       'acceptedPredictionTokens',
@@ -51,6 +65,7 @@ export class MessageTransformer {
       'inputCitationTokens',
       'inputImageTokens',
       'inputTextTokens',
+      'inputVideoTokens',
       'inputToolTokens',
       'inputWriteCacheTokens',
       'outputAudioTokens',
@@ -63,18 +78,16 @@ export class MessageTransformer {
       'totalTokens',
     ] as const;
 
-    let hasUsage = false;
     usageFields.forEach((field) => {
-      if (metadata[field] !== undefined) {
+      if (metadata?.[field] !== undefined && (usage as any)[field] === undefined) {
         (usage as any)[field] = metadata[field];
         hasUsage = true;
       }
     });
 
     const performanceFields = ['duration', 'latency', 'tps', 'ttft'] as const;
-    let hasPerformance = false;
     performanceFields.forEach((field) => {
-      if (metadata[field] !== undefined) {
+      if (metadata?.[field] !== undefined && (performance as any)[field] === undefined) {
         (performance as any)[field] = metadata[field];
         hasPerformance = true;
       }
@@ -90,7 +103,7 @@ export class MessageTransformer {
    * Aggregate metadata from multiple children
    * - Sums token counts and costs
    * - Takes first ttft
-   * - Averages tps
+   * - Calculates tps from paired output tokens and generation durations
    * - Sums duration and latency
    */
   aggregateMetadata(children: AssistantContentBlock[]): {
@@ -101,8 +114,8 @@ export class MessageTransformer {
     const performance: ModelPerformance = {};
     let hasUsageData = false;
     let hasPerformanceData = false;
-    let tpsSum = 0;
-    let tpsCount = 0;
+    let measuredOutputTokens = 0;
+    let generationDuration = 0;
 
     children.forEach((child) => {
       if (child.usage) {
@@ -114,6 +127,7 @@ export class MessageTransformer {
           'inputCitationTokens',
           'inputImageTokens',
           'inputTextTokens',
+          'inputVideoTokens',
           'inputToolTokens',
           'inputWriteCacheTokens',
           'outputAudioTokens',
@@ -146,11 +160,20 @@ export class MessageTransformer {
           hasPerformanceData = true;
         }
 
-        // Average tps (tokens per second)
-        if (typeof child.performance.tps === 'number') {
-          tpsSum += child.performance.tps;
-          tpsCount += 1;
-          hasPerformanceData = true;
+        // Pair tokens with their measured duration so incomplete calls cannot skew either sum.
+        // Averaging per-call rates would give short bursts the same weight as long generations.
+        const outputTokens = child.usage?.totalOutputTokens;
+        const duration = child.performance.duration;
+        if (
+          typeof outputTokens === 'number' &&
+          Number.isFinite(outputTokens) &&
+          outputTokens >= 0 &&
+          typeof duration === 'number' &&
+          Number.isFinite(duration) &&
+          duration > 0
+        ) {
+          measuredOutputTokens += outputTokens;
+          generationDuration += duration;
         }
 
         // Sum duration
@@ -167,9 +190,8 @@ export class MessageTransformer {
       }
     });
 
-    // Calculate average tps
-    if (tpsCount > 0) {
-      performance.tps = tpsSum / tpsCount;
+    if (generationDuration > 0) {
+      performance.tps = (measuredOutputTokens / generationDuration) * 1000;
     }
 
     return {

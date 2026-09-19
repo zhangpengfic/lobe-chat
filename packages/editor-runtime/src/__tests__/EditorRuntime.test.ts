@@ -1,6 +1,7 @@
 import type { IEditor } from '@lobehub/editor';
 import { CommonPlugin, Kernel, LitexmlPlugin, MarkdownPlugin, moment } from '@lobehub/editor';
 import { resetRandomKey } from 'lexical';
+import type { Mock } from 'vitest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EditorRuntime } from '../EditorRuntime';
@@ -8,8 +9,8 @@ import { EditorRuntime } from '../EditorRuntime';
 describe('EditorRuntime', () => {
   let runtime: EditorRuntime;
   let editor: IEditor;
-  let mockTitleSetter: ReturnType<typeof vi.fn>;
-  let mockTitleGetter: ReturnType<typeof vi.fn>;
+  let mockTitleSetter: Mock<(title: string) => void>;
+  let mockTitleGetter: Mock<() => string>;
 
   beforeEach(() => {
     resetRandomKey();
@@ -520,6 +521,100 @@ describe('EditorRuntime', () => {
 
       const result = await runtime.getPageContent({ format: 'markdown' });
       expect(result.documentId).toBe('my-doc-id');
+    });
+  });
+
+  describe('beforeMutateHandler', () => {
+    it('should call beforeMutateHandler before initPage', async () => {
+      const handler = vi.fn().mockResolvedValue(undefined);
+      runtime.setBeforeMutateHandler(handler);
+
+      await runtime.initPage({ markdown: 'Test content' });
+      await moment();
+
+      expect(handler).toHaveBeenCalledWith({ apiName: 'initPage' });
+    });
+
+    it('should call beforeMutateHandler before editTitle', async () => {
+      const handler = vi.fn().mockResolvedValue(undefined);
+      runtime.setBeforeMutateHandler(handler);
+
+      await runtime.editTitle({ title: 'New Title' });
+
+      expect(handler).toHaveBeenCalledWith({ apiName: 'editTitle' });
+    });
+
+    it('should call beforeMutateHandler before modifyNodes', async () => {
+      const handler = vi.fn().mockResolvedValue(undefined);
+      runtime.setBeforeMutateHandler(handler);
+
+      await runtime.modifyNodes({
+        operations: [{ action: 'insert', afterId: 'root', litexml: '<p>Test</p>' }],
+      });
+
+      expect(handler).toHaveBeenCalledWith({ apiName: 'modifyNodes' });
+    });
+
+    it('should call beforeMutateHandler before replaceText', async () => {
+      const handler = vi.fn().mockResolvedValue(undefined);
+      runtime.setBeforeMutateHandler(handler);
+
+      await runtime.replaceText({ searchText: 'old', newText: 'new' });
+
+      expect(handler).toHaveBeenCalledWith({ apiName: 'replaceText' });
+    });
+
+    it('should still proceed when beforeMutateHandler is not set', async () => {
+      runtime.setBeforeMutateHandler(null);
+
+      const result = await runtime.editTitle({ title: 'Another Title' });
+      expect(result.newTitle).toBe('Another Title');
+    });
+
+    it('should still proceed when beforeMutateHandler throws', async () => {
+      const handler = vi.fn().mockRejectedValue(new Error('Handler failed'));
+      runtime.setBeforeMutateHandler(handler);
+
+      // Should not throw; initPage should proceed
+      const result = await runtime.initPage({ markdown: 'Test content' });
+      await moment();
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(result.nodeCount).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe('afterMutateHandler', () => {
+    it('should call afterMutateHandler after initPage succeeds', async () => {
+      const handler = vi.fn().mockResolvedValue(undefined);
+      runtime.setAfterMutateHandler(handler);
+
+      await runtime.initPage({ markdown: 'Test content' });
+      await moment();
+
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not call afterMutateHandler when initPage fails before mutation', async () => {
+      const handler = vi.fn().mockResolvedValue(undefined);
+      runtime.setAfterMutateHandler(handler);
+
+      await expect(runtime.initPage({ markdown: '' })).rejects.toThrow(
+        'initPage failed: markdown content is empty.',
+      );
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('should still proceed when afterMutateHandler throws', async () => {
+      const handler = vi.fn().mockRejectedValue(new Error('Handler failed'));
+      runtime.setAfterMutateHandler(handler);
+
+      const result = await runtime.initPage({ markdown: 'Test content' });
+      await moment();
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(result.nodeCount).toBeGreaterThanOrEqual(0);
     });
   });
 

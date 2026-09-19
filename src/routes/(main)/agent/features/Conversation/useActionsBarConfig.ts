@@ -1,66 +1,45 @@
 'use client';
 
-import { App } from 'antd';
-import { Split } from 'lucide-react';
-import { useCallback, useMemo } from 'react';
-import { useTranslation } from 'react-i18next';
+import { useMemo } from 'react';
 
-import {
-  type ActionsBarConfig,
-  type MessageActionFactory,
-  type MessageActionItem,
-} from '@/features/Conversation/types';
-import { useChatStore } from '@/store/chat';
-import { useUserStore } from '@/store/user';
-import { userGeneralSettingsSelectors } from '@/store/user/selectors';
+import { type ActionsBarConfig, type MessageActionSlot } from '@/features/Conversation/types';
+import { useAgentStore } from '@/store/agent';
+import { agentSelectors } from '@/store/agent/selectors';
 
 /**
- * Hook to create a branching action factory function.
- * The factory function takes a message id and returns the branching action
- * with proper ChatStore integration.
+ * Hetero-agent (Claude Code / Codex) sessions keep the menu minimal — copy +
+ * delete — because the external runtime owns the assistant message lifecycle
+ * (edit / regenerate / branching / translate / tts / share don't apply).
+ * `select` remains available because forwarding / batch deletion is handled by
+ * the local conversation UI and does not depend on the external runtime.
+ *
+ * The one user-message action that DOES belong here is `restoreToInput`: a long
+ * CLI run that errors out or loses context is exactly when you want to pull the
+ * original prompt (text + attachments) back into the composer to retry. So it
+ * is scoped to the hetero user menu instead of the native-agent default.
  */
-export const useBranchingActionFactory = (): MessageActionFactory => {
-  const { t } = useTranslation('common');
-  const { message } = App.useApp();
-
-  const [topic, openThreadCreator] = useChatStore((s) => [s.activeTopicId, s.openThreadCreator]);
-
-  return useCallback(
-    (id: string): MessageActionItem | null => {
-      return {
-        handleClick: () => {
-          if (!topic) {
-            message.warning(t('branchingRequiresSavedTopic'));
-            return;
-          }
-          openThreadCreator(id);
-        },
-        icon: Split,
-        key: 'branching',
-        label: t('branching'),
-      };
-    },
-    [topic, openThreadCreator],
-  );
+const HETERO_USER: { bar: MessageActionSlot[]; menu: MessageActionSlot[] } = {
+  bar: ['copy'],
+  menu: ['restoreToInput', 'copy', 'divider', 'select', 'divider', 'del'],
 };
 
-/**
- * Hook to generate actionsBar configuration with branching support.
- * This creates the complete actionsBar config to be passed to ChatList.
- */
-export const useActionsBarConfig = (): ActionsBarConfig => {
-  const branchingFactory = useBranchingActionFactory();
-  const isDevMode = useUserStore((s) => userGeneralSettingsSelectors.config(s).isDevMode);
+const HETERO_ASSISTANT: { bar: MessageActionSlot[]; menu: MessageActionSlot[] } = {
+  bar: ['copy'],
+  menu: ['copy', 'divider', 'select', 'divider', 'del'],
+};
 
-  return useMemo(
-    () => ({
-      assistant: {
-        extraBarActions: isDevMode ? [branchingFactory] : [],
-      },
-      user: {
-        extraBarActions: isDevMode ? [branchingFactory] : [],
-      },
-    }),
-    [branchingFactory, isDevMode],
-  );
+export const useActionsBarConfig = (): ActionsBarConfig => {
+  const isHeteroAgent = useAgentStore(agentSelectors.isCurrentAgentHeterogeneous);
+
+  return useMemo<ActionsBarConfig>(() => {
+    if (isHeteroAgent) {
+      return {
+        assistant: HETERO_ASSISTANT,
+        assistantGroup: HETERO_ASSISTANT,
+        user: HETERO_USER,
+      };
+    }
+
+    return {};
+  }, [isHeteroAgent]);
 };

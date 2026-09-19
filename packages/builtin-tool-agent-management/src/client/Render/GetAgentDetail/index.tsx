@@ -2,7 +2,8 @@
 
 import { DEFAULT_AVATAR } from '@lobechat/const';
 import type { BuiltinRenderProps } from '@lobechat/types';
-import { Avatar, Block, Flexbox, Markdown, Tag } from '@lobehub/ui';
+import { Block, Flexbox, Markdown } from '@lobehub/ui';
+import { Avatar, Tag } from '@lobehub/ui/base-ui';
 import { createStaticStyles, useTheme } from 'antd-style';
 import { memo } from 'react';
 
@@ -10,9 +11,7 @@ import type { GetAgentDetailParams, GetAgentDetailState } from '../../../types';
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
   container: css`
-    padding: 12px;
-    border-radius: 8px;
-    background: ${cssVar.colorFillQuaternary};
+    padding-block: 4px;
   `,
   field: css`
     margin-block-end: 8px;

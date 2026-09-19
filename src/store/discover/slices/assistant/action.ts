@@ -2,6 +2,7 @@ import { type CategoryItem, type CategoryListQuery } from '@lobehub/market-sdk';
 import { type SWRResponse } from 'swr';
 import useSWR from 'swr';
 
+import { discoverKeys } from '@/libs/swr/keys';
 import { discoverService } from '@/services/discover';
 import { type DiscoverStore } from '@/store/discover';
 import { globalHelpers } from '@/store/global/helpers';
@@ -27,10 +28,11 @@ export class AssistantActionImpl {
 
   useAssistantCategories = (
     params: CategoryListQuery & { source?: AssistantMarketSource },
+    options: { enabled?: boolean } = {},
   ): SWRResponse<CategoryItem[]> => {
     const locale = globalHelpers.getCurrentLanguage();
     return useSWR(
-      ['assistant-categories', locale, ...Object.values(params)].filter(Boolean).join('-'),
+      options.enabled === false ? null : discoverKeys.assistantCategories(locale, params),
       async () => discoverService.getAssistantCategories(params),
       {
         revalidateOnFocus: false,
@@ -45,9 +47,7 @@ export class AssistantActionImpl {
   }): SWRResponse<DiscoverAssistantDetail | undefined> => {
     const locale = globalHelpers.getCurrentLanguage();
     return useSWR(
-      ['assistant-details', locale, params.identifier, params.version, params.source]
-        .filter(Boolean)
-        .join('-'),
+      discoverKeys.assistantDetail(locale, params),
       async () => discoverService.getAssistantDetail(params),
       {
         revalidateOnFocus: false,
@@ -59,8 +59,7 @@ export class AssistantActionImpl {
     source?: AssistantMarketSource;
   }): SWRResponse<IdentifiersResponse> => {
     return useSWR(
-      ['assistant-identifiers', params?.source].filter(Boolean).join('-') ||
-        'assistant-identifiers',
+      discoverKeys.assistantIdentifiers(params?.source),
       async () => discoverService.getAssistantIdentifiers(params),
       {
         revalidateOnFocus: false,
@@ -68,10 +67,13 @@ export class AssistantActionImpl {
     );
   };
 
-  useAssistantList = (params: AssistantQueryParams = {}): SWRResponse<AssistantListResponse> => {
+  useAssistantList = (
+    params: AssistantQueryParams = {},
+    options: { keepPreviousData?: boolean } = {},
+  ): SWRResponse<AssistantListResponse> => {
     const locale = globalHelpers.getCurrentLanguage();
     return useSWR(
-      ['assistant-list', locale, ...Object.values(params)].filter(Boolean).join('-'),
+      discoverKeys.assistantList(locale, params),
       async () =>
         discoverService.getAssistantList({
           ...params,
@@ -79,6 +81,7 @@ export class AssistantActionImpl {
           pageSize: params.pageSize ? Number(params.pageSize) : 21,
         }),
       {
+        keepPreviousData: options.keepPreviousData,
         revalidateOnFocus: false,
       },
     );

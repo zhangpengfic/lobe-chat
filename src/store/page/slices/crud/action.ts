@@ -1,7 +1,9 @@
+import { CUSTOM_DOCUMENT_FILE_TYPE } from '@lobechat/const';
 import { type SWRResponse } from 'swr';
 
 import { useClientDataSWRWithSync } from '@/libs/swr';
 import { documentService } from '@/services/document';
+import { documentSWRKeys } from '@/services/document/swrKeys';
 import { type StoreSetter } from '@/store/types';
 import { type LobeDocument } from '@/types/document';
 import { DocumentSourceType } from '@/types/document';
@@ -12,7 +14,7 @@ import { type PageStore } from '../../store';
 
 const n = setNamespace('page/crud');
 
-const EDITOR_PAGE_FILE_TYPE = 'custom/document';
+const EDITOR_PAGE_FILE_TYPE = CUSTOM_DOCUMENT_FILE_TYPE;
 
 /**
  * Page update parameters - flattened for easier use
@@ -36,18 +38,23 @@ export class CrudActionImpl {
     this.#get = get;
   }
 
-  createNewPage = async (title: string): Promise<string> => {
+  createNewPage = async (title: string, visibility?: 'private' | 'public'): Promise<string> => {
     const { createOptimisticPage, createPage, replaceTempPageWithReal } = this.#get();
 
-    // Create optimistic page immediately
-    const tempPageId = createOptimisticPage(title);
+    // Create optimistic page immediately in the requested bucket so the item
+    // shows up under the correct accordion before the server responds. The
+    // real row will replace it and confirm the visibility a moment later.
+    const tempPageId = createOptimisticPage(title, visibility);
     this.#set({ isCreatingNew: true, selectedPageId: tempPageId }, false, n('createNewPage/start'));
 
     try {
       // Create real page
-      const newPage = await createPage({ content: '', title });
+      const newPage = await createPage({ content: '', title, visibility });
 
-      // Convert to LobeDocument
+      // Convert to LobeDocument. `visibility` and `workspaceId` MUST come from
+      // the server response so the sidebar bucketing selector keeps the row in
+      // the same accordion the user clicked "+" from — omitting them makes the
+      // row silently fall back to the workspace bucket.
       const realPage: LobeDocument = {
         content: newPage.content || '',
         createdAt: newPage.createdAt ? new Date(newPage.createdAt) : new Date(),
@@ -55,7 +62,7 @@ export class CrudActionImpl {
           typeof newPage.editorData === 'string'
             ? JSON.parse(newPage.editorData)
             : newPage.editorData || null,
-        fileType: 'custom/document',
+        fileType: CUSTOM_DOCUMENT_FILE_TYPE,
         filename: newPage.title || title,
         id: newPage.id,
         metadata: newPage.metadata || {},
@@ -65,6 +72,9 @@ export class CrudActionImpl {
         totalCharCount: newPage.content?.length || 0,
         totalLineCount: 0,
         updatedAt: newPage.updatedAt ? new Date(newPage.updatedAt) : new Date(),
+        userId: newPage.userId,
+        visibility: newPage.visibility ?? visibility ?? null,
+        workspaceId: newPage.workspaceId ?? null,
       };
 
       // Replace optimistic with real
@@ -89,7 +99,10 @@ export class CrudActionImpl {
     }
   };
 
-  createOptimisticPage = (title: string = 'Untitled'): string => {
+  createOptimisticPage = (
+    title: string = 'Untitled',
+    visibility?: 'private' | 'public',
+  ): string => {
     // Generate temporary ID with prefix to identify optimistic pages
     const tempId = `temp-page-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const now = new Date();
@@ -108,6 +121,7 @@ export class CrudActionImpl {
       totalCharCount: 0,
       totalLineCount: 0,
       updatedAt: now,
+      visibility: visibility ?? null,
     };
 
     // Add to documents array via internal dispatch
@@ -121,11 +135,13 @@ export class CrudActionImpl {
     content = '',
     knowledgeBaseId,
     parentId,
+    visibility,
   }: {
     content?: string;
     knowledgeBaseId?: string;
     parentId?: string;
     title: string;
+    visibility?: 'private' | 'public';
   }): Promise<{ [key: string]: any; id: string }> => {
     const now = Date.now();
 
@@ -139,6 +155,7 @@ export class CrudActionImpl {
       },
       parentId,
       title,
+      visibility,
     });
 
     return newPage;
@@ -196,6 +213,11 @@ export class CrudActionImpl {
       totalCharCount: newPage.content?.length || 0,
       totalLineCount: 0,
       updatedAt: newPage.updatedAt ? new Date(newPage.updatedAt) : new Date(),
+      userId: newPage.userId,
+      // Keep the sidebar bucket in sync — duplicating a private page must land
+      // in "Private", not silently in "Workspace".
+      visibility: newPage.visibility ?? null,
+      workspaceId: newPage.workspaceId ?? null,
     };
 
     this.#get().internal_dispatchDocuments({ document: editorPage, type: 'addDocument' });
@@ -325,11 +347,6 @@ export class CrudActionImpl {
     // Queue background sync to DB
     try {
       await documentService.updateDocument({
-        content: updatedPage.content || '',
-        editorData:
-          typeof updatedPage.editorData === 'string'
-            ? updatedPage.editorData
-            : JSON.stringify(updatedPage.editorData || {}),
         id: pageId,
         metadata: updatedPage.metadata || {},
         parentId: updatedPage.parentId || undefined,
@@ -350,7 +367,7 @@ export class CrudActionImpl {
   };
 
   useFetchPageDetail = (pageId: string | undefined): SWRResponse<LobeDocument | null> => {
-    const swrKey = pageId ? ['pageDetail', pageId] : null;
+    const swrKey = pageId ? documentSWRKeys.pageDetail(pageId) : null;
 
     return useClientDataSWRWithSync<LobeDocument | null>(
       swrKey,
@@ -363,7 +380,10 @@ export class CrudActionImpl {
           return null;
         }
 
-        // Transform API response to LobeDocument format
+        // Transform API response to LobeDocument format. `visibility` MUST be
+        // carried through so the sidebar's Private / Workspace bucketing stays
+        // stable when this hook's `onData` writes back into the shared docs
+        // array (see the `internal_dispatchDocuments` call below).
         const fullPage: LobeDocument = {
           content: document.content || null,
           createdAt: document.createdAt ? new Date(document.createdAt) : new Date(),
@@ -381,6 +401,9 @@ export class CrudActionImpl {
           totalCharCount: document.content?.length || 0,
           totalLineCount: 0,
           updatedAt: document.updatedAt ? new Date(document.updatedAt) : new Date(),
+          userId: document.userId,
+          visibility: document.visibility ?? null,
+          workspaceId: document.workspaceId ?? null,
         };
 
         return fullPage;

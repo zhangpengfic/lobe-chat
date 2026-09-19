@@ -1,4 +1,5 @@
-import { Flexbox, Text } from '@lobehub/ui';
+import { Flexbox } from '@lobehub/ui';
+import { Text } from '@lobehub/ui/base-ui';
 import { memo, Suspense } from 'react';
 
 import DebugNode from '@/components/DebugNode';
@@ -6,11 +7,12 @@ import DebugNode from '@/components/DebugNode';
 import type { CheckboxItemProps } from '../components/CheckboxWithLoading';
 import CheckboxItem from '../components/CheckboxWithLoading';
 
-const ToolItem = memo<CheckboxItemProps>(({ id, onUpdate, label, checked }) => {
+const ToolItem = memo<CheckboxItemProps>(({ id, onUpdate, label, checked, disabled }) => {
   return (
     <Suspense fallback={<DebugNode trace="ActionBar/Tools/ToolItem" />}>
       <CheckboxItem
         checked={checked}
+        disabled={disabled}
         hasPadding={false}
         id={id}
         label={

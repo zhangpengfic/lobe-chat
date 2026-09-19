@@ -7,6 +7,7 @@ import type {
 } from '@lobechat/context-engine';
 import type {
   ChatToolPayload,
+  ExpertiseContextSnapshot,
   SecurityBlacklistConfig,
   UserInterventionConfig,
 } from '@lobechat/types';
@@ -35,7 +36,11 @@ export interface AgentState {
   costLimit?: CostLimit;
   // --- Metadata ---
   createdAt: string;
+  /** Whether ContextEngine may inject the operation expertise snapshot. */
+  enableExpertise?: boolean;
   error?: any;
+  /** Immutable expertise snapshot resolved once when this operation starts. */
+  expertise?: ExpertiseContextSnapshot;
   /**
    * When true, the agent is in force-finish mode (maxSteps exceeded).
    * Tools are allowed to complete, but the next LLM call will have tools stripped
@@ -76,6 +81,15 @@ export interface AgentState {
    * Used as fallback when call_llm instruction doesn't specify model/provider
    */
   modelRuntimeConfig?: {
+    /**
+     * Immutable operation snapshot shared by tool discovery and context processing.
+     * Optional for operations created before this snapshot was introduced.
+     */
+    mediaCapabilities?: {
+      audio?: boolean;
+      video?: boolean;
+      vision?: boolean;
+    };
     model: string;
     provider: string;
     /**
@@ -91,6 +105,34 @@ export interface AgentState {
 
   /** Operation-level tool set snapshot (immutable after creation) */
   operationToolSet?: OperationToolSet;
+  pendingApprovalBatch?: {
+    assistantMessageId: string;
+    id: string;
+    sealed: true;
+    stepIndex: number;
+    /**
+     * Previous durable batch whose still-pending rows were rebound into this
+     * parked operation. The server notification adapter turns this into an
+     * atomic generic-store supersession; keeping only authoritative source
+     * identities here avoids coupling the runtime package to ActivityKit or a
+     * Cloud database model.
+     */
+    supersedes?: {
+      batchId: string;
+      operationId: string;
+      toolCallIds: string[];
+    };
+  };
+  // --- HIL ---
+  /**
+   * Assistant placeholder seeded for a resume that starts by executing a tool
+   * (e.g. a human-approved / auto-approved tool such as the tools activator).
+   * The first `call_llm` after that tool consumes this id so its output reuses
+   * the placeholder instead of creating a new message and orphaning the seed.
+   * Cleared once consumed.
+   */
+  pendingAssistantMessageId?: string;
+
   pendingHumanPrompt?: { metadata?: Record<string, unknown>; prompt: string };
   pendingHumanSelect?: {
     metadata?: Record<string, unknown>;
@@ -98,8 +140,8 @@ export interface AgentState {
     options: Array<{ label: string; value: string }>;
     prompt?: string;
   };
-
-  // --- HIL ---
+  /** toolCallId -> durable pending tool-message id for the current sealed batch. */
+  pendingToolMessageIds?: Record<string, string>;
   /**
    * When status is 'waiting_for_human', this stores pending requests
    * for human-in-the-loop operations.
@@ -113,7 +155,14 @@ export interface AgentState {
    */
   securityBlacklist?: SecurityBlacklistConfig;
   // --- State Machine ---
-  status: 'idle' | 'running' | 'waiting_for_human' | 'done' | 'error' | 'interrupted';
+  status:
+    | 'idle'
+    | 'running'
+    | 'waiting_for_human'
+    | 'waiting_for_async_tool'
+    | 'done'
+    | 'error'
+    | 'interrupted';
 
   // --- Execution Tracking ---
   /**
@@ -123,6 +172,14 @@ export interface AgentState {
   stepCount: number;
 
   systemRole?: string;
+  /**
+   * Consecutive LLM turns that emitted the same normalized tool calls.
+   * Only signatures present in the latest tool-calling turn are retained.
+   */
+  toolCallRepeatGuard?: {
+    counts: Record<string, number>;
+  };
+
   /** Tool executor map for routing tool execution between server and client */
   toolExecutorMap?: Record<string, ToolExecutor>;
 
@@ -155,6 +212,12 @@ export interface ToolsCalling {
     name: string; // A JSON string of arguments
   };
   id: string;
+  /**
+   * Gemini 3.x thought signature, captured from `functionCall.thoughtSignature` in the
+   * streaming response. Must be round-tripped back in subsequent requests or Gemini will
+   * 400 with a misleading "ordering" error. Optional; only set for Gemini 3.x tool calls.
+   */
+  thoughtSignature?: string;
   type: 'function';
 }
 

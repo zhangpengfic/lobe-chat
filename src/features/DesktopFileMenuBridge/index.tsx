@@ -1,13 +1,14 @@
 'use client';
 
-import { SESSION_CHAT_URL } from '@lobechat/const';
+import { AGENT_CHAT_URL } from '@lobechat/const';
 import { useWatchBroadcast } from '@lobechat/electron-client-ipc';
 import { useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 
-import { useCreateMenuItems } from '@/routes/(main)/home/_layout/hooks/useCreateMenuItems';
+import { useCreateMenuItems } from '@/features/HomeSidebar/hooks/useCreateMenuItems';
+import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
 import { useAgentStore } from '@/store/agent';
 import { builtinAgentSelectors } from '@/store/agent/selectors';
+import { useChatStore } from '@/store/chat';
 
 /**
  * Bridge component for handling File menu actions from Electron main process
@@ -15,16 +16,21 @@ import { builtinAgentSelectors } from '@/store/agent/selectors';
  */
 const DesktopFileMenuBridge = () => {
   const { createAgent, createEmptyGroup, createPage } = useCreateMenuItems();
-  const navigate = useNavigate();
+  const navigate = useWorkspaceAwareNavigate();
   const inboxAgentId = useAgentStore(builtinAgentSelectors.inboxAgentId);
   const activeAgentId = useAgentStore((s) => s.activeAgentId);
 
   // Handle create new topic from File menu
-  // If currently in an agent page, create a new topic for the current agent
-  // Otherwise, navigate to inbox agent
+  // If currently in an agent page, clear the active topic via the store —
+  // navigating to the same path won't clear `activeTopicId` because
+  // ChatHydration's URL→store updater skips `undefined` values.
+  // If not in an agent page, navigate to inbox agent.
   const handleCreateNewTopic = useCallback(() => {
-    const targetAgentId = activeAgentId || inboxAgentId;
-    navigate(SESSION_CHAT_URL(targetAgentId, false));
+    if (activeAgentId) {
+      useChatStore.getState().switchTopic(null);
+      return;
+    }
+    navigate(AGENT_CHAT_URL(inboxAgentId, false));
   }, [activeAgentId, inboxAgentId, navigate]);
 
   // Handle create new agent from File menu

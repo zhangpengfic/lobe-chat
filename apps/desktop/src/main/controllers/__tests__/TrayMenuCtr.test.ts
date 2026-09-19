@@ -1,5 +1,6 @@
 import type {
   ShowTrayNotificationParams,
+  TrayNavigationSnapshot,
   UpdateTrayIconParams,
   UpdateTrayTooltipParams,
 } from '@lobechat/electron-client-ipc';
@@ -19,14 +20,6 @@ vi.mock('electron', () => ({
   },
 }));
 
-// Mock logger
-vi.mock('@/utils/logger', () => ({
-  createLogger: () => ({
-    debug: vi.fn(),
-    error: vi.fn(),
-  }),
-}));
-
 // Save the original platform to restore after all tests complete
 const originalPlatform = process.platform;
 
@@ -40,13 +33,23 @@ const mockDisplayBalloon = vi.fn();
 const mockUpdateIcon = vi.fn();
 const mockUpdateTooltip = vi.fn();
 const mockGetMainTray = vi.fn();
+const mockSetAppTrayVisible = vi.fn();
+const mockUpdateNavigationSnapshot = vi.fn();
+const mockStoreGet = vi.fn(() => true);
+const mockStoreSet = vi.fn();
 
 const mockApp = {
   browserManager: {
     getMainWindow: mockGetMainWindow,
   },
+  storeManager: {
+    get: mockStoreGet,
+    set: mockStoreSet,
+  },
   trayManager: {
     getMainTray: mockGetMainTray,
+    setAppTrayVisible: mockSetAppTrayVisible,
+    updateNavigationSnapshot: mockUpdateNavigationSnapshot,
   },
 } as unknown as App;
 
@@ -58,7 +61,44 @@ describe('TrayMenuCtr', () => {
     ipcMainHandleMock.mockClear();
     // Reset mockedTray for each test
     mockGetMainTray.mockReset();
+    mockStoreGet.mockReturnValue(true);
     trayMenuCtr = new TrayMenuCtr(mockApp);
+  });
+
+  describe('getAppTrayVisible', () => {
+    it('should return stored app tray visibility', () => {
+      mockStoreGet.mockReturnValue(false);
+
+      const result = trayMenuCtr.getAppTrayVisible();
+
+      expect(mockStoreGet).toHaveBeenCalledWith('appTrayVisible', true);
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('setAppTrayVisible', () => {
+    it('should persist and apply app tray visibility', () => {
+      const result = trayMenuCtr.setAppTrayVisible(false);
+
+      expect(mockStoreSet).toHaveBeenCalledWith('appTrayVisible', false);
+      expect(mockSetAppTrayVisible).toHaveBeenCalledWith(false);
+      expect(result).toEqual({ success: true });
+    });
+  });
+
+  describe('updateNavigationSnapshot', () => {
+    it('should pass the latest navigation snapshot to the tray manager', () => {
+      const snapshot: TrayNavigationSnapshot = {
+        agents: [{ id: 'agent-1', title: 'Researcher', url: '/agent/agent-1' }],
+        pinned: [{ title: 'Pinned task', url: '/tasks/pinned' }],
+        recent: [{ title: 'Recent page', url: '/page/recent' }],
+      };
+
+      const result = trayMenuCtr.updateNavigationSnapshot(snapshot);
+
+      expect(mockUpdateNavigationSnapshot).toHaveBeenCalledWith(snapshot);
+      expect(result).toEqual({ success: true });
+    });
   });
 
   // Restore platform settings after all tests complete

@@ -1,11 +1,13 @@
 import { ModelProvider } from 'model-bank';
 
+import type { OpenAICompatibleFactoryOptions } from '../../core/openaiCompatibleFactory';
 import { createOpenAICompatibleRuntime } from '../../core/openaiCompatibleFactory';
 import { resolveParameters } from '../../core/parameterResolver';
 import { QwenAIStream } from '../../core/streams';
 import { processMultiProviderModelList } from '../../utils/modelParse';
 import { createQwenImage } from './createImage';
 import { createQwenVideo } from './createVideo';
+import { isThinkingForcedQwenModel } from './modelId';
 
 export interface QwenModelCard {
   id: string;
@@ -23,12 +25,30 @@ export const QwenLegacyModels = new Set([
   'qwen-1.8b-longcontext-chat',
 ]);
 
-export const LobeQwenAI = createOpenAICompatibleRuntime({
+export const params = {
   baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   chatCompletion: {
     handlePayload: (payload) => {
-      const { model, presence_penalty, temperature, thinking, top_p, enabledSearch, ...rest } =
-        payload;
+      const {
+        model,
+        presence_penalty,
+        reasoning_effort,
+        temperature,
+        thinking,
+        top_p,
+        enabledSearch,
+        preserveThinking,
+        ...rest
+      } = payload;
+      const isDeepSeekV4Model = model.startsWith('deepseek-v4');
+      const thinkingExplicitlyDisabled = thinking?.type === 'disabled';
+      /** Qwen3.8 rejects simultaneous effort and budget controls; explicit effort takes priority. */
+      const thinkingBudget =
+        model.startsWith('qwen3.8-') && !thinkingExplicitlyDisabled && reasoning_effort
+          ? undefined
+          : thinking?.budget_tokens === 0
+            ? 0
+            : thinking?.budget_tokens || undefined;
 
       // Resolve parameters with model-specific constraints
       const resolvedParams = resolveParameters(
@@ -44,24 +64,65 @@ export const LobeQwenAI = createOpenAICompatibleRuntime({
         },
       );
 
+      const messages = (rest.messages || []).map((message: any) => {
+        const { reasoning, ...messageRest } = message;
+
+        const reasoningContent =
+          typeof messageRest.reasoning_content === 'string'
+            ? messageRest.reasoning_content
+            : typeof reasoning?.content === 'string'
+              ? reasoning.content
+              : undefined;
+
+        if (reasoningContent !== undefined) {
+          return {
+            ...messageRest,
+            reasoning_content: reasoningContent,
+          };
+        }
+
+        return messageRest;
+      });
+
       return {
         ...rest,
-        ...(model.includes('-thinking')
+        ...(isDeepSeekV4Model
           ? {
-              enable_thinking: true,
-              thinking_budget:
-                thinking?.budget_tokens === 0 ? 0 : thinking?.budget_tokens || undefined,
+              ...(thinking?.type === 'enabled' || thinkingExplicitlyDisabled
+                ? { enable_thinking: !thinkingExplicitlyDisabled }
+                : {}),
+              ...(!thinkingExplicitlyDisabled && reasoning_effort && { reasoning_effort }),
             }
-          : thinking
+          : isThinkingForcedQwenModel(model)
             ? {
-                ...(thinking.type !== undefined && {
-                  enable_thinking: thinking.type === 'enabled',
+                enable_thinking: true,
+                // A disabled preference carries budget_tokens: 0 — sending it alongside
+                // a forced-on thinking flag would zero out the reasoning budget.
+                ...(!thinkingExplicitlyDisabled && {
+                  thinking_budget: thinkingBudget,
                 }),
-                thinking_budget:
-                  thinking?.budget_tokens === 0 ? 0 : thinking?.budget_tokens || undefined,
+                ...(!thinkingExplicitlyDisabled && reasoning_effort && { reasoning_effort }),
               }
-            : {}),
+            : model.includes('-thinking')
+              ? {
+                  enable_thinking: true,
+                  thinking_budget: thinkingBudget,
+                  ...(reasoning_effort && { reasoning_effort }),
+                }
+              : thinking
+                ? {
+                    ...(thinking.type !== undefined && {
+                      enable_thinking: thinking.type === 'enabled',
+                    }),
+                    thinking_budget: thinkingBudget,
+                    ...(!thinkingExplicitlyDisabled && reasoning_effort && { reasoning_effort }),
+                  }
+                : {
+                    ...(reasoning_effort && { reasoning_effort }),
+                  }),
+        ...(typeof preserveThinking === 'boolean' && { preserve_thinking: preserveThinking }),
         frequency_penalty: undefined,
+        messages,
         model,
         presence_penalty: resolvedParams.presence_penalty,
         stream: true,
@@ -101,4 +162,6 @@ export const LobeQwenAI = createOpenAICompatibleRuntime({
     return processMultiProviderModelList(modelList, 'qwen');
   },
   provider: ModelProvider.Qwen,
-});
+} satisfies OpenAICompatibleFactoryOptions;
+
+export const LobeQwenAI = createOpenAICompatibleRuntime(params);

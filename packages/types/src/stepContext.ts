@@ -15,7 +15,7 @@ export type StepContextTodoStatus = 'todo' | 'processing' | 'completed';
 
 /**
  * Todo item structure
- * Duplicated here to avoid circular dependency with builtin-tool-gtd
+ * Duplicated here to avoid circular dependency with builtin-tool-lobe-agent
  */
 export interface StepContextTodoItem {
   status: StepContextTodoStatus;
@@ -35,7 +35,12 @@ export interface StepContextTodos {
  */
 export interface StepActivatedSkill {
   description?: string;
-  id: string;
+  /**
+   * DB skill id. Absent for filesystem (project/device) and builtin skill
+   * activations, whose persisted state carries no id — consumers match by
+   * `name` (the server exec paths resolve archives/project skills by name).
+   */
+  id?: string;
   name: string;
 }
 
@@ -72,6 +77,33 @@ export interface InitialPageEditorContext {
    * Initial XML structure (for reference)
    */
   xml: string;
+}
+
+/**
+ * Active topic document context
+ * Captured when a user leaves the topic page editor but continues the same
+ * topic conversation from the regular chat surface.
+ */
+export interface RuntimeActiveTopicDocumentContext {
+  /**
+   * Agent-document row ID used by lobe-agent-documents read/patch/edit APIs.
+   */
+  agentDocumentId?: string;
+  /**
+   * Underlying documents.id used by topic page routes.
+   */
+  documentId: string;
+  /**
+   * Optional send-time document snapshot.
+   *
+   * This lets non-page surfaces, such as an agent-document floating panel,
+   * provide the current document body without enabling PageAgent editor tools.
+   */
+  snapshot?: InitialPageEditorContext;
+  /**
+   * Human-readable title for model disambiguation.
+   */
+  title?: string | null;
 }
 
 /**
@@ -155,7 +187,7 @@ export interface RuntimeStepContext {
   stepPageEditor?: StepPageEditorContext;
   /**
    * Current todo list state
-   * Computed from the latest GTD tool message in the conversation
+   * Computed from the latest lobe-agent tool message in the conversation
    */
   todos?: StepContextTodos;
 }
@@ -195,6 +227,17 @@ export interface InjectedToolManifest {
  */
 export interface RuntimeInitialContext {
   /**
+   * Active topic document carried from page route to regular chat route.
+   * This lets the model continue document work without page-editor tools.
+   */
+  activeTopicDocument?: RuntimeActiveTopicDocumentContext;
+  /**
+   * Goal progress overview, built from the goal detail page the user is
+   * currently viewing. Injected into the last user message so the LLM can
+   * answer progress questions about the goal without extra tool calls.
+   */
+  goalOverview?: InitialGoalOverviewContext;
+  /**
    * Ad-hoc tool manifests injected by callers for the current request.
    * Merged into the tool resolution output without passing through ToolsEngine.
    * Deduplication: manifests whose identifier already appears in enabledToolIds are skipped.
@@ -221,4 +264,44 @@ export interface RuntimeInitialContext {
    * This constrains the available tools for the current runtime execution
    */
   selectedTools?: RuntimeSelectedTool[];
+  /**
+   * Task Manager page context, built from the tasks list/detail page the user
+   * is currently viewing. Injected into the last user message so the LLM can
+   * answer questions about the on-screen tasks without extra tool calls.
+   */
+  taskManager?: InitialTaskManagerContext;
+}
+
+export interface InitialTaskManagerContext {
+  /** Prebuilt prompt describing the tasks shown on the page. */
+  contextPrompt: string;
+}
+
+export interface GoalOverviewTaskItem {
+  /** 1-based attempt count so far, when known. */
+  attempts?: number;
+  /** 1-based Task number as shown in the UI (#1, #2 …). */
+  seq?: number;
+  status: string;
+  title: string;
+}
+
+export interface GoalOverviewDecision {
+  question: string;
+}
+
+/**
+ * Structured snapshot of the goal the user is viewing. Producers (goal page /
+ * server pipeline) pass the data; the context-engine injector owns turning it
+ * into prompt text, so wording changes never touch the transports.
+ */
+export interface InitialGoalOverviewContext {
+  findings: string[];
+  goal: {
+    requirement?: string | null;
+    status: string;
+    title: string;
+  };
+  pendingDecisions: GoalOverviewDecision[];
+  tasks: GoalOverviewTaskItem[];
 }

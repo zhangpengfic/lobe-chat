@@ -3,10 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { useChatStore } from '@/store/chat';
 import { AI_RUNTIME_OPERATION_TYPES } from '@/store/chat/slices/operation/types';
+import { messageMapKey } from '@/store/chat/utils/messageMapKey';
 
 import { useOperationState } from './useOperationState';
-
-vi.mock('zustand/traditional');
 
 describe('useOperationState', () => {
   const TEST_CONTEXT = {
@@ -269,6 +268,57 @@ describe('useOperationState', () => {
   });
 
   describe('isInputLoading', () => {
+    it('should detect loading for a page-scoped floating chat panel context', () => {
+      const context = {
+        agentId: 'test-agent-id',
+        scope: 'page',
+        threadId: null,
+        topicId: 'test-topic-id',
+      } as const;
+
+      const { result } = renderHook(() => useOperationState(context));
+
+      expect(result.current.isInputLoading).toBe(false);
+      expect(result.current.isAIGenerating).toBe(false);
+
+      act(() => {
+        useChatStore.getState().startOperation({
+          context,
+          type: 'execAgentRuntime',
+        });
+      });
+
+      expect(useChatStore.getState().operationsByContext[messageMapKey(context)]).toHaveLength(1);
+      expect(result.current.isInputLoading).toBe(true);
+      expect(result.current.isInputVisiblyLoading).toBe(true);
+      expect(result.current.isAIGenerating).toBe(true);
+    });
+
+    it('should keep input blocked after visible loading ends before terminal bookkeeping', () => {
+      const context = {
+        agentId: 'test-agent-id',
+        topicId: 'test-topic-id',
+        threadId: null,
+      } as const;
+
+      const { result } = renderHook(() => useOperationState(context));
+
+      act(() => {
+        useChatStore.getState().startOperation({
+          context,
+          metadata: { visibleLoadingDone: true },
+          type: 'execAgentRuntime',
+        });
+      });
+
+      // Example: visible_output_end arrived, but agent_runtime_end has not
+      // drained queue/cache/unread side effects yet. UI loading can stop, but
+      // edit-confirm regenerate must still stay blocked.
+      expect(result.current.isInputLoading).toBe(true);
+      expect(result.current.isInputVisiblyLoading).toBe(false);
+      expect(result.current.isAIGenerating).toBe(false);
+    });
+
     it('should clear loading after cancelling an operation in a null-topic context', () => {
       const context = {
         agentId: 'test-agent-id',
@@ -306,6 +356,7 @@ describe('useOperationState', () => {
 
       expect(useChatStore.getState().operations[operationId!].status).toBe('cancelled');
       expect(result.current.isInputLoading).toBe(false);
+      expect(result.current.isInputVisiblyLoading).toBe(false);
     });
   });
 });

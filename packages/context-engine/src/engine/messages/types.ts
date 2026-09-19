@@ -1,6 +1,13 @@
 /* eslint-disable perfectionist/sort-interfaces */
-import type { FileContent, KnowledgeBaseInfo, PageContentContext } from '@lobechat/prompts';
 import type {
+  AgentIdentityContext,
+  FileContent,
+  KnowledgeBaseInfo,
+  PageContentContext,
+} from '@lobechat/prompts';
+import type {
+  ExpertiseContextSnapshot,
+  RuntimeAdditionalContextFragment,
   RuntimeInitialContext,
   RuntimeSelectedSkill,
   RuntimeSelectedTool,
@@ -18,12 +25,13 @@ import type { DiscordContext } from '../../providers/DiscordContextProvider';
 import type { EvalContext } from '../../providers/EvalContextSystemInjector';
 import type { GroupAgentBuilderContext } from '../../providers/GroupAgentBuilderContextInjector';
 import type { GroupMemberInfo } from '../../providers/GroupContextInjector';
-import type { GTDPlan } from '../../providers/GTDPlanInjector';
-import type { GTDTodoList } from '../../providers/GTDTodoInjector';
 import type { OnboardingContext } from '../../providers/OnboardingContextInjector';
+import type { Plan } from '../../providers/PlanInjector';
 import type { SkillMeta } from '../../providers/SkillContextProvider';
+import type { TodoList } from '../../providers/TodoInjector';
 import type { ToolDiscoveryMeta } from '../../providers/ToolDiscoveryProvider';
 import type { TopicReferenceItem } from '../../providers/TopicReferenceContextInjector';
+import type { WorkspaceContext } from '../../providers/WorkspaceContextInjector';
 import type { PipelineContextMetadata } from '../../types';
 import type { LobeToolManifest } from '../tools/types';
 
@@ -32,6 +40,8 @@ import type { LobeToolManifest } from '../tools/types';
  * Injected by caller to check if model supports specific capabilities
  */
 export interface ModelCapabilityChecker {
+  /** Check if audio input is supported */
+  isCanUseAudio?: (model: string, provider: string) => boolean;
   /** Check if function calling is supported */
   isCanUseFC?: (model: string, provider: string) => boolean;
   /** Check if video is supported */
@@ -54,6 +64,8 @@ export interface KnowledgeConfig {
  * Tools configuration
  */
 export interface ToolsConfig {
+  /** Tool identifiers that must be removed from historical tool calls in this runtime scope */
+  disabledToolIdentifiers?: string[];
   /** Tool manifests with systemRole and API definitions */
   manifests?: LobeToolManifest[];
   /** Enabled tool IDs (kept for compatibility) */
@@ -190,16 +202,16 @@ export interface AgentGroupConfig {
 }
 
 /**
- * GTD (Getting Things Done) configuration
+ * Plan + Todo configuration
  * Used to inject plan and todo context for task management
  */
-export interface GTDConfig {
-  /** Whether GTD context injection is enabled */
+export interface PlanTodoConfig {
+  /** Whether plan/todo context injection is enabled */
   enabled?: boolean;
   /** The current plan to inject (injected before first user message) */
-  plan?: GTDPlan;
+  plan?: Plan;
   /** The current todo list to inject (injected at end of last user message) */
-  todos?: GTDTodoList;
+  todos?: TodoList;
 }
 
 /**
@@ -211,6 +223,10 @@ export interface MessagesEngineParams {
   messages: UIChatMessage[];
   /** Model ID */
   model: string;
+  /** Human-friendly model name, e.g. `Fable 5`. Omit when unknown. */
+  modelDisplayName?: string;
+  /** Model knowledge cutoff date, e.g. `2024-06`. Omit when unknown. */
+  modelKnowledgeCutoff?: string;
   /** Provider ID */
   provider: string;
 
@@ -221,8 +237,17 @@ export interface MessagesEngineParams {
   timezone?: string | null;
 
   // ========== Agent configuration ==========
+  /**
+   * Whether the agent runs in agent mode. When explicitly `false` (chat mode)
+   * the engine force-disables agentic-only injectors — skills (`<available_skills>`)
+   * and agent documents — regardless of whether their data is supplied.
+   * Undefined / true → agent mode (default).
+   */
+  enableAgentMode?: boolean;
   /** Whether to enable history message count limit */
   enableHistoryCount?: boolean;
+  /** Whether to inject the operation expertise snapshot */
+  enableExpertise?: boolean;
   /** Force finish flag: when true, injects summary prompt for max-steps completion */
   forceFinish?: boolean;
   /** Function to format history summary */
@@ -235,6 +260,16 @@ export interface MessagesEngineParams {
   inputTemplate?: string;
   /** System role */
   systemRole?: string;
+  /**
+   * The agent's identity (personal `name` + role `title`), appended to the
+   * system message so the model can introduce itself by the name the user gave
+   * it. Ignored in group chat, where GroupContextInjector owns identity.
+   */
+  agentIdentity?: AgentIdentityContext;
+  /** Agent-materialized presentation contexts for this LLM call */
+  additionalContexts?: readonly RuntimeAdditionalContextFragment[];
+  /** Immutable expertise captured when the operation started. */
+  expertise?: ExpertiseContextSnapshot;
 
   // ========== Capability injection (dependency injection) ==========
   /** Model capability checker */
@@ -273,6 +308,11 @@ export interface MessagesEngineParams {
   agentBuilderContext?: AgentBuilderContext;
   /** Bot platform context for injecting platform capabilities (e.g. markdown support) */
   botPlatformContext?: BotPlatformContext;
+  /**
+   * Where the conversation lives (app origin + workspace slug), so the model
+   * writes in-app links that resolve to the right scope.
+   */
+  workspaceContext?: WorkspaceContext;
   /** Discord context for injecting channel/guild info into system injection message */
   discordContext?: DiscordContext;
   /** Eval context for injecting environment prompts into system message */
@@ -285,8 +325,8 @@ export interface MessagesEngineParams {
   agentGroup?: AgentGroupConfig;
   /** Group Agent Builder context */
   groupAgentBuilderContext?: GroupAgentBuilderContext;
-  /** GTD (Getting Things Done) configuration */
-  gtd?: GTDConfig;
+  /** Plan + Todo configuration */
+  planTodo?: PlanTodoConfig;
   /** Reaction feedback configuration */
   reactionFeedback?: {
     enabled?: boolean;
@@ -344,10 +384,11 @@ export { type BotPlatformContext } from '../../providers/BotPlatformContextInjec
 export { type DiscordContext } from '../../providers/DiscordContextProvider';
 export { type EvalContext } from '../../providers/EvalContextSystemInjector';
 export { type GroupAgentBuilderContext } from '../../providers/GroupAgentBuilderContextInjector';
-export { type GTDPlan } from '../../providers/GTDPlanInjector';
-export { type GTDTodoItem, type GTDTodoList } from '../../providers/GTDTodoInjector';
+export { type Plan } from '../../providers/PlanInjector';
 export { type SkillMeta } from '../../providers/SkillContextProvider';
+export { type TodoItem, type TodoList } from '../../providers/TodoInjector';
 export { type ToolDiscoveryMeta } from '../../providers/ToolDiscoveryProvider';
 export { type TopicReferenceItem } from '../../providers/TopicReferenceContextInjector';
+export { type WorkspaceContext } from '../../providers/WorkspaceContextInjector';
 export { type OpenAIChatMessage, type UIChatMessage } from '@/types/index';
 export { type FileContent, type KnowledgeBaseInfo } from '@lobechat/prompts';

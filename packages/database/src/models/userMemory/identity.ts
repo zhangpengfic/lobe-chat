@@ -3,18 +3,30 @@ import { RelationshipEnum } from '@lobechat/types';
 import type { SQL } from 'drizzle-orm';
 import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
+import type { FtsSearchCandidateSource } from '../../repositories/ftsSearch';
 import type { NewUserMemoryIdentity, UserMemoryIdentity } from '../../schemas';
 import { userMemories, userMemoriesIdentities } from '../../schemas';
 import type { LobeChatDatabase } from '../../type';
-import { SAFE_BM25_QUERY_OPTIONS, sanitizeBm25Query } from '../../utils/bm25';
+import { normalizeBm25MatchQuery, SAFE_BM25_QUERY_OPTIONS } from '../../utils/bm25';
+import { inJsonStringArray } from '../../utils/inJsonStringArray';
 
 export class UserMemoryIdentityModel {
   private userId: string;
   private db: LobeChatDatabase;
+  private ftsSearchCandidateSource?: FtsSearchCandidateSource;
 
-  constructor(db: LobeChatDatabase, userId: string) {
+  constructor(
+    db: LobeChatDatabase,
+    userId: string,
+    ftsSearchCandidateSource?: FtsSearchCandidateSource,
+  ) {
     this.userId = userId;
     this.db = db;
+    this.ftsSearchCandidateSource = ftsSearchCandidateSource;
+  }
+
+  private memoryWhere(table: { userId: any }) {
+    return eq(table.userId, this.userId);
   }
 
   create = async (params: Omit<NewUserMemoryIdentity, 'userId'>) => {
@@ -29,10 +41,7 @@ export class UserMemoryIdentityModel {
   delete = async (id: string) => {
     return this.db.transaction(async (tx) => {
       const identity = await tx.query.userMemoriesIdentities.findFirst({
-        where: and(
-          eq(userMemoriesIdentities.id, id),
-          eq(userMemoriesIdentities.userId, this.userId),
-        ),
+        where: and(eq(userMemoriesIdentities.id, id), this.memoryWhere(userMemoriesIdentities)),
       });
 
       if (!identity || !identity.userMemoryId) {
@@ -42,25 +51,21 @@ export class UserMemoryIdentityModel {
       // Delete the base user memory (cascade will handle the identity)
       await tx
         .delete(userMemories)
-        .where(
-          and(eq(userMemories.id, identity.userMemoryId), eq(userMemories.userId, this.userId)),
-        );
+        .where(and(eq(userMemories.id, identity.userMemoryId), this.memoryWhere(userMemories)));
 
       return { success: true };
     });
   };
 
   deleteAll = async () => {
-    return this.db
-      .delete(userMemoriesIdentities)
-      .where(eq(userMemoriesIdentities.userId, this.userId));
+    return this.db.delete(userMemoriesIdentities).where(this.memoryWhere(userMemoriesIdentities));
   };
 
   query = async (limit = 50) => {
     return this.db.query.userMemoriesIdentities.findMany({
       limit,
       orderBy: [desc(userMemoriesIdentities.capturedAt)],
-      where: eq(userMemoriesIdentities.userId, this.userId),
+      where: this.memoryWhere(userMemoriesIdentities),
     });
   };
 
@@ -75,22 +80,40 @@ export class UserMemoryIdentityModel {
     const normalizedPageSize = Math.min(Math.max(pageSize, 1), 100);
     const offset = (normalizedPage - 1) * normalizedPageSize;
     const normalizedQuery = typeof q === 'string' ? q.trim() : '';
-    const bm25Query = normalizedQuery
-      ? sanitizeBm25Query(normalizedQuery, SAFE_BM25_QUERY_OPTIONS)
+    const bm25MatchQuery = normalizedQuery
+      ? normalizeBm25MatchQuery(normalizedQuery, SAFE_BM25_QUERY_OPTIONS)
       : '';
+    const resolvedRelationships =
+      relationships && relationships.length > 0 ? relationships : [RelationshipEnum.Self];
+    const candidateResult =
+      normalizedQuery && this.ftsSearchCandidateSource?.ftsSearchCandidateEnabled
+        ? await this.ftsSearchCandidateSource.ftsSearchCandidates({
+            entity: 'memoryIdentities',
+            filters: {
+              memoryRelationships: resolvedRelationships,
+              ...(tags?.length ? { memoryTagMatch: 'any' as const, memoryTags: tags } : {}),
+              ...(types?.length ? { memoryTypes: types } : {}),
+            },
+            pagination: {},
+            query: {
+              fields: ['parent_title', 'description', 'role'],
+              text: normalizedQuery,
+            },
+          })
+        : undefined;
+    const candidateIds = candidateResult?.candidates.map(({ id }) => id);
 
     // Build WHERE conditions
     const conditions: Array<SQL | undefined> = [
-      eq(userMemoriesIdentities.userId, this.userId),
+      this.memoryWhere(userMemoriesIdentities),
+      candidateIds ? inJsonStringArray(userMemoriesIdentities.id, candidateIds) : undefined,
       // Full-text search across title, description, role
-      normalizedQuery
-        ? sql`(${userMemories.title} @@@ ${bm25Query} OR ${userMemoriesIdentities.description} @@@ ${bm25Query} OR ${userMemoriesIdentities.role} @@@ ${bm25Query})`
+      normalizedQuery && !candidateIds
+        ? sql`(${userMemories.id} @@@ paradedb.boolean(should => ARRAY[paradedb.match('title', ${bm25MatchQuery}, conjunction_mode => true)]) OR ${userMemoriesIdentities.id} @@@ paradedb.boolean(should => ARRAY[paradedb.match('description', ${bm25MatchQuery}, conjunction_mode => true), paradedb.match('role', ${bm25MatchQuery}, conjunction_mode => true)]))`
         : undefined,
       types && types.length > 0 ? inArray(userMemoriesIdentities.type, types) : undefined,
       // Default to 'self' relationship if not specified
-      relationships && relationships.length > 0
-        ? inArray(userMemoriesIdentities.relationship, relationships)
-        : eq(userMemoriesIdentities.relationship, RelationshipEnum.Self),
+      inArray(userMemoriesIdentities.relationship, resolvedRelationships),
       tags && tags.length > 0
         ? or(...tags.map((tag) => sql<boolean>`${tag} = ANY(${userMemoriesIdentities.tags})`))
         : undefined,
@@ -113,7 +136,7 @@ export class UserMemoryIdentityModel {
     // JOIN condition
     const joinCondition = and(
       eq(userMemories.id, userMemoriesIdentities.userMemoryId),
-      eq(userMemories.userId, this.userId),
+      this.memoryWhere(userMemories),
     );
 
     // Execute queries in parallel
@@ -155,7 +178,7 @@ export class UserMemoryIdentityModel {
 
   findById = async (id: string) => {
     return this.db.query.userMemoriesIdentities.findFirst({
-      where: and(eq(userMemoriesIdentities.id, id), eq(userMemoriesIdentities.userId, this.userId)),
+      where: and(eq(userMemoriesIdentities.id, id), this.memoryWhere(userMemoriesIdentities)),
     });
   };
 
@@ -163,9 +186,7 @@ export class UserMemoryIdentityModel {
     return this.db
       .update(userMemoriesIdentities)
       .set({ ...value, updatedAt: new Date() })
-      .where(
-        and(eq(userMemoriesIdentities.id, id), eq(userMemoriesIdentities.userId, this.userId)),
-      );
+      .where(and(eq(userMemoriesIdentities.id, id), this.memoryWhere(userMemoriesIdentities)));
   };
 
   /**
@@ -187,7 +208,7 @@ export class UserMemoryIdentityModel {
       .from(userMemoriesIdentities)
       .where(
         and(
-          eq(userMemoriesIdentities.userId, this.userId),
+          this.memoryWhere(userMemoriesIdentities),
           // Only include self identities (relationship is 'self' or null/not set)
           or(
             eq(userMemoriesIdentities.relationship, RelationshipEnum.Self),

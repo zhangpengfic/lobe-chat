@@ -1,11 +1,13 @@
 'use client';
 
-import { Icon, Tag } from '@lobehub/ui';
+import { Icon } from '@lobehub/ui';
+import { Tag } from '@lobehub/ui/base-ui';
 import qs from 'query-string';
 import { memo, useMemo } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
 
 import { withSuspense } from '@/components/withSuspense';
+import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
+import WorkspaceLink from '@/features/Workspace/WorkspaceLink';
 import { useCategory } from '@/hooks/useMCPCategory';
 import { useQuery } from '@/hooks/useQuery';
 import { SCROLL_PARENT_ID } from '@/routes/(main)/community/features/const';
@@ -21,7 +23,7 @@ const Category = memo(() => {
     q?: string;
   };
   const { data: items = [] } = useMcpCategories({ q });
-  const navigate = useNavigate();
+  const navigate = useWorkspaceAwareNavigate();
   const cates = useCategory();
 
   const genUrl = (key: McpCategory) =>
@@ -78,7 +80,7 @@ const Category = memo(() => {
                 ),
           ...item,
           icon: <Icon icon={item.icon} size={18} />,
-          label: <Link to={genUrl(item.key)}>{item.label}</Link>,
+          label: <WorkspaceLink to={genUrl(item.key)}>{item.label}</WorkspaceLink>,
         };
       })}
       onClick={(v) => handleClick(v.key as McpCategory)}

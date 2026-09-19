@@ -1,14 +1,13 @@
 import { type SWRResponse } from 'swr';
 
 import { mutate, useClientDataSWR } from '@/libs/swr';
+import { agentBotKeys } from '@/libs/swr/keys';
 import type { SerializedPlatformDefinition } from '@/server/services/bot/platforms/types';
 import { agentBotProviderService } from '@/services/agentBotProvider';
 import { type StoreSetter } from '@/store/types';
+import type { BotRuntimeStatusSnapshot } from '@/types/botRuntimeStatus';
 
 import { type AgentStore } from '../../store';
-
-const FETCH_BOT_PROVIDERS_KEY = 'agentBotProviders';
-const FETCH_PLATFORM_DEFINITIONS_KEY = 'platformDefinitions';
 
 export interface BotProviderItem {
   applicationId: string;
@@ -56,6 +55,18 @@ export class BotSliceActionImpl {
     return agentBotProviderService.testConnection(params);
   };
 
+  lineFetchBotInfo = async (channelAccessToken: string) => {
+    return agentBotProviderService.lineFetchBotInfo(channelAccessToken);
+  };
+
+  feishuFetchOwnerId = async (params: {
+    appId: string;
+    appSecret: string;
+    platform: 'feishu' | 'lark';
+  }) => {
+    return agentBotProviderService.feishuFetchOwnerId(params);
+  };
+
   deleteAllBotProviders = async (agentId: string) => {
     const providers = await agentBotProviderService.getByAgentId(agentId);
     await Promise.all(providers.map((p) => agentBotProviderService.delete(p.id)));
@@ -67,10 +78,35 @@ export class BotSliceActionImpl {
     await this.internal_refreshBotProviders(agentId);
   };
 
+  refreshBotRuntimeStatus = async (params: {
+    agentId?: string;
+    applicationId: string;
+    platform: string;
+  }): Promise<BotRuntimeStatusSnapshot> => {
+    const { agentId, ...rest } = params;
+    const snapshot = await agentBotProviderService.refreshRuntimeStatus(rest);
+    await this.internal_refreshBotProviders(agentId);
+    return snapshot;
+  };
+
+  /**
+   * Kick off a background refresh of every provider's live gateway status.
+   * Fire-and-forget: the list can render from cached statuses immediately,
+   * and we revalidate SWR once the server finishes updating Redis.
+   */
+  triggerRefreshAllBotStatuses = (agentId: string) => {
+    agentBotProviderService
+      .refreshRuntimeStatusesByAgent(agentId)
+      .then(() => this.internal_refreshBotProviders(agentId))
+      .catch(() => {
+        // Non-critical: cached statuses remain visible.
+      });
+  };
+
   internal_refreshBotProviders = async (agentId?: string) => {
     const id = agentId || this.#get().activeAgentId;
     if (!id) return;
-    await mutate([FETCH_BOT_PROVIDERS_KEY, id]);
+    await mutate(agentBotKeys.providers(id));
   };
 
   updateBotProvider = async (
@@ -89,7 +125,7 @@ export class BotSliceActionImpl {
 
   useFetchBotProviders = (agentId?: string): SWRResponse<BotProviderItem[]> => {
     return useClientDataSWR<BotProviderItem[]>(
-      agentId ? [FETCH_BOT_PROVIDERS_KEY, agentId] : null,
+      agentId ? agentBotKeys.providers(agentId) : null,
       async ([, id]: [string, string]) => agentBotProviderService.getByAgentId(id),
       { fallbackData: [], revalidateOnFocus: false },
     );
@@ -97,7 +133,7 @@ export class BotSliceActionImpl {
 
   useFetchPlatformDefinitions = (): SWRResponse<SerializedPlatformDefinition[]> => {
     return useClientDataSWR<SerializedPlatformDefinition[]>(
-      FETCH_PLATFORM_DEFINITIONS_KEY,
+      agentBotKeys.platformDefinitions(),
       () => agentBotProviderService.listPlatforms(),
       { dedupingInterval: 300_000, fallbackData: [], revalidateOnFocus: false },
     );

@@ -12,13 +12,22 @@ import AgentIdSync from './AgentIdSync';
 
 const useParamsMock = vi.hoisted(() => vi.fn());
 const useSearchParamsMock = vi.hoisted(() => vi.fn());
+const useNavigateMock = vi.hoisted(() => vi.fn());
+const useLocationMock = vi.hoisted(() => vi.fn());
+const useInitAgentConfigMock = vi.hoisted(() => vi.fn());
 
-vi.mock('react-router-dom', async () => {
+vi.mock('@/hooks/useInitAgentConfig', () => ({
+  useInitAgentConfig: useInitAgentConfigMock,
+}));
+
+vi.mock('react-router', async () => {
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-  const actual = (await vi.importActual('react-router-dom')) as typeof import('react-router-dom');
+  const actual = (await vi.importActual('react-router')) as typeof import('react-router');
 
   return {
     ...actual,
+    useLocation: useLocationMock,
+    useNavigate: () => useNavigateMock,
     useParams: useParamsMock,
     useSearchParams: useSearchParamsMock,
   };
@@ -28,6 +37,10 @@ describe('AgentIdSync', () => {
   beforeEach(() => {
     useParamsMock.mockReset();
     useSearchParamsMock.mockReset();
+    useNavigateMock.mockReset();
+    useLocationMock.mockReset();
+    useInitAgentConfigMock.mockReset();
+    useLocationMock.mockReturnValue({ pathname: '/agent/agent-1' });
 
     useChatStore.setState(
       {
@@ -41,6 +54,15 @@ describe('AgentIdSync', () => {
     );
   });
 
+  it('hydrates the agent resolved from the current route', () => {
+    useParamsMock.mockReturnValue({ aid: 'agent-2' });
+    useSearchParamsMock.mockReturnValue([new URLSearchParams(''), vi.fn()]);
+
+    render(<AgentIdSync />);
+
+    expect(useInitAgentConfigMock).toHaveBeenCalledWith('agent-2');
+  });
+
   it('clears portal state when switching to another agent without a topic in the URL', () => {
     useParamsMock.mockReturnValue({ aid: 'agent-1' });
     useSearchParamsMock.mockReturnValue([new URLSearchParams(''), vi.fn()]);
@@ -50,6 +72,7 @@ describe('AgentIdSync', () => {
     expect(useChatStore.getState().showPortal).toBe(true);
 
     useParamsMock.mockReturnValue({ aid: 'agent-2' });
+    useLocationMock.mockReturnValue({ pathname: '/agent/agent-2' });
     rerender(<AgentIdSync />);
 
     expect(useChatStore.getState().activeTopicId).toBeNull();
@@ -64,9 +87,25 @@ describe('AgentIdSync', () => {
     const { rerender } = render(<AgentIdSync />);
 
     useParamsMock.mockReturnValue({ aid: 'agent-2' });
+    useLocationMock.mockReturnValue({ pathname: '/agent/agent-2' });
     rerender(<AgentIdSync />);
 
     expect(useChatStore.getState().portalStack).toEqual([]);
     expect(useChatStore.getState().showPortal).toBe(false);
+    expect(useChatStore.getState().activeTopicId).toBe('topic-1');
+  });
+
+  it('preserves the active topic when the destination route carries a topic path segment', () => {
+    useParamsMock.mockReturnValue({ aid: 'agent-1', topicId: 'topic-1' });
+    useSearchParamsMock.mockReturnValue([new URLSearchParams(''), vi.fn()]);
+
+    const { rerender } = render(<AgentIdSync />);
+
+    useParamsMock.mockReturnValue({ aid: 'agent-2', topicId: 'topic-2' });
+    rerender(<AgentIdSync />);
+
+    expect(useChatStore.getState().portalStack).toEqual([]);
+    expect(useChatStore.getState().showPortal).toBe(false);
+    expect(useChatStore.getState().activeTopicId).toBe('topic-1');
   });
 });

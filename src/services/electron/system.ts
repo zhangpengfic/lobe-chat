@@ -1,10 +1,19 @@
-import {
-  type ElectronAppState,
-  type WindowMinimumSizeParams,
-  type WindowSizeParams,
+import type {
+  ElectronAppState,
+  PopupContextMenuParams,
+  PopupContextMenuResult,
+  WindowMinimumSizeParams,
+  WindowSizeParams,
 } from '@lobechat/electron-client-ipc';
 
 import { ensureElectronIpc } from '@/utils/electron/ipc';
+
+export interface SystemFont {
+  label: string;
+  value: string;
+}
+
+export type SystemMonospaceFont = SystemFont;
 
 /**
  * Service class for interacting with Electron's system-level information and actions.
@@ -24,6 +33,22 @@ class ElectronSystemService {
     return this.ipc.system.getAppState();
   }
 
+  async setDesktopOnboardingCompleted(completed: boolean): Promise<void> {
+    return this.ipc.system.setDesktopOnboardingCompleted(completed);
+  }
+
+  async setLastWorkspaceSlug(slug: string | null): Promise<void> {
+    return this.ipc.system.setLastWorkspaceSlug(slug);
+  }
+
+  async getSystemMonospaceFonts(): Promise<SystemFont[]> {
+    return this.ipc.system.getSystemMonospaceFonts();
+  }
+
+  async getSystemFonts(): Promise<SystemFont[]> {
+    return this.ipc.system.getSystemFonts();
+  }
+
   async closeWindow(): Promise<void> {
     return this.ipc.windows.closeWindow();
   }
@@ -36,8 +61,20 @@ class ElectronSystemService {
     return this.ipc.windows.isWindowMaximized();
   }
 
+  async isWindowFullScreen(): Promise<boolean> {
+    return this.ipc.windows.isWindowFullScreen();
+  }
+
   async minimizeWindow(): Promise<void> {
     return this.ipc.windows.minimizeWindow();
+  }
+
+  async setWindowAlwaysOnTop(flag: boolean): Promise<void> {
+    return this.ipc.windows.setWindowAlwaysOnTop(flag);
+  }
+
+  async isWindowAlwaysOnTop(): Promise<boolean> {
+    return this.ipc.windows.isWindowAlwaysOnTop();
   }
 
   async setWindowSize(params: WindowSizeParams): Promise<void> {
@@ -62,6 +99,14 @@ class ElectronSystemService {
 
   showContextMenu = async (type: string, data?: any) => {
     return this.ipc.menu.showContextMenu({ data, type });
+  };
+
+  popupContextMenu = async (params: PopupContextMenuParams): Promise<PopupContextMenuResult> => {
+    return this.ipc.menu.popupContextMenu(params);
+  };
+
+  closePopupContextMenu = async (): Promise<void> => {
+    return this.ipc.menu.closePopupContextMenu();
   };
 
   /**

@@ -1,7 +1,13 @@
-import { AiModelSourceEnum } from 'model-bank';
+import {
+  AiModelSourceEnum,
+  type ExtendParamsType,
+  MODEL_REASONING_EXTEND_PARAMS,
+} from 'model-bank/aiModel';
 
 import { type AIProviderStoreState } from '@/store/aiInfra/initialState';
 import { ModelSearchImplement } from '@/types/search';
+
+import { modelReasoningConfigKey } from './initialState';
 
 const aiProviderChatModelListIds = (s: AIProviderStoreState) =>
   s.aiProviderModelList.filter((item) => item.type === 'chat').map((item) => item.id);
@@ -27,7 +33,9 @@ const totalAiProviderModelList = (s: AIProviderStoreState) => s.aiProviderModelL
 const isEmptyAiProviderModelList = (s: AIProviderStoreState) => totalAiProviderModelList(s) === 0;
 
 const getModelCard = (model: string, provider: string) => (s: AIProviderStoreState) =>
-  s.builtinAiModelList.find((item) => item.id === model && item.providerId === provider);
+  s.enabledAiModels?.find(
+    (item) => item.id === model && (provider ? item.providerId === provider : true),
+  ) || s.builtinAiModelList.find((item) => item.id === model && item.providerId === provider);
 
 const hasRemoteModels = (s: AIProviderStoreState) =>
   s.aiProviderModelList.some((m) => m.source === AiModelSourceEnum.Remote);
@@ -68,6 +76,18 @@ const isModelSupportVideo = (id: string, provider: string) => (s: AIProviderStor
   return model?.abilities?.video;
 };
 
+const isModelSupportAudio = (id: string, provider: string) => (s: AIProviderStoreState) => {
+  const model = getEnabledModelById(id, provider)(s);
+
+  return model?.abilities?.audio || false;
+};
+
+const isModelSupportImageOutput = (id: string, provider: string) => (s: AIProviderStoreState) => {
+  const model = getEnabledModelById(id, provider)(s);
+
+  return model?.abilities?.imageOutput || false;
+};
+
 const isModelSupportReasoning = (id: string, provider: string) => (s: AIProviderStoreState) => {
   const model = getEnabledModelById(id, provider)(s);
 
@@ -91,6 +111,59 @@ const modelExtendParams = (id: string, provider: string) => (s: AIProviderStoreS
   const model = getEnabledModelById(id, provider)(s);
 
   return model?.settings?.extendParams;
+};
+
+const REASONING_EXTEND_PARAMS_SET = new Set<ExtendParamsType>(MODEL_REASONING_EXTEND_PARAMS);
+
+/**
+ * The subset of the model's extend params covered by the user-level
+ * model-instance reasoning config (effort family + reasoningMode).
+ */
+const modelReasoningExtendParams = (id: string, provider: string) => (s: AIProviderStoreState) =>
+  (modelExtendParams(id, provider)(s) ?? []).filter((param) =>
+    REASONING_EXTEND_PARAMS_SET.has(param),
+  );
+
+const isModelHasReasoningExtendParams =
+  (id: string, provider: string) => (s: AIProviderStoreState) =>
+    modelReasoningExtendParams(id, provider)(s).length > 0;
+
+/**
+ * Whether the model exposes extend params beyond the reasoning family. The
+ * reasoning family is edited through the ChatInput Effort control (user-level
+ * model-instance config), so surfaces rendering a ControlsForm with
+ * `hideReasoningParams` must gate on this instead of `isModelHasExtendParams`,
+ * otherwise a reasoning-only model shows an empty popover.
+ */
+const isModelHasNonReasoningExtendParams =
+  (id: string, provider: string) => (s: AIProviderStoreState) =>
+    (modelExtendParams(id, provider)(s) ?? []).some(
+      (param) => !REASONING_EXTEND_PARAMS_SET.has(param),
+    );
+
+/**
+ * The user's saved per-model-instance reasoning defaults (personal scope).
+ */
+const modelReasoningConfig = (id: string, provider: string) => (s: AIProviderStoreState) =>
+  s.modelReasoningConfigMap?.[modelReasoningConfigKey(provider, id)];
+
+/**
+ * Whether `ensureModelReasoningConfig` / the SWR loader has settled the saved
+ * config for this model (the key is kept even when nothing is saved). Topic
+ * snapshots must not pin "model defaults" while the real value is still in
+ * flight, so they skip pinning until this is true.
+ */
+const isModelReasoningConfigLoaded = (id: string, provider: string) => (s: AIProviderStoreState) =>
+  modelReasoningConfigKey(provider, id) in (s.modelReasoningConfigMap ?? {});
+
+const isModelReasoningConfigUpdating =
+  (id: string, provider: string) => (s: AIProviderStoreState) =>
+    !!s.modelReasoningConfigUpdatingKeys?.includes(modelReasoningConfigKey(provider, id));
+
+const modelDisabledParams = (id: string, provider: string) => (s: AIProviderStoreState) => {
+  const model = getEnabledModelById(id, provider)(s);
+
+  return model?.settings?.disabledParams;
 };
 
 const isModelHasExtendParams = (id: string, provider: string) => (s: AIProviderStoreState) => {
@@ -147,14 +220,23 @@ export const aiModelSelectors = {
   isModelHasBuiltinSearchConfig,
   isModelHasContextWindowToken,
   isModelHasExtendParams,
+  isModelHasNonReasoningExtendParams,
+  isModelHasReasoningExtendParams,
   isModelLoading,
+  isModelReasoningConfigLoaded,
+  isModelReasoningConfigUpdating,
+  isModelSupportAudio,
   isModelSupportFiles,
+  isModelSupportImageOutput,
   isModelSupportReasoning,
   isModelSupportToolUse,
   isModelSupportVideo,
   isModelSupportVision,
   modelBuiltinSearchImpl,
   modelContextWindowTokens,
+  modelDisabledParams,
   modelExtendParams,
+  modelReasoningConfig,
+  modelReasoningExtendParams,
   totalAiProviderModelList,
 };

@@ -1,66 +1,40 @@
 'use client';
 
-import {
-  type GoogleAnalyticsProviderConfig,
-  type PostHogProviderAnalyticsConfig,
+import type {
+  GoogleAnalyticsProviderConfig,
+  PostHogProviderAnalyticsConfig,
+  XAdsProviderAnalyticsConfig,
 } from '@lobehub/analytics';
-import { createSingletonAnalytics } from '@lobehub/analytics';
-import { AnalyticsProvider } from '@lobehub/analytics/react';
 import { type ReactNode } from 'react';
-import { memo, useMemo } from 'react';
+import { memo, useEffect } from 'react';
 
-import { BUSINESS_LINE } from '@/const/analytics';
-import { isDesktop } from '@/const/version';
-import { isDev } from '@/utils/env';
+import { loadAnalytics } from '@/libs/analytics/client';
 
 type Props = {
   children: ReactNode;
   ga4Config: GoogleAnalyticsProviderConfig;
   postHogConfig: PostHogProviderAnalyticsConfig;
+  xAdsConfig: XAdsProviderAnalyticsConfig;
 };
 
-let analyticsInstance: ReturnType<typeof createSingletonAnalytics> | null = null;
+const scheduleIdle = (task: () => void) => {
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(task, { timeout: 3000 });
+    return;
+  }
+
+  window.setTimeout(task, 0);
+};
 
 export const LobeAnalyticsProvider = memo(
-  ({ children, ga4Config, postHogConfig }: Props) => {
-    const analytics = useMemo(() => {
-      if (analyticsInstance) {
-        return analyticsInstance;
-      }
-
-      analyticsInstance = createSingletonAnalytics({
-        business: BUSINESS_LINE,
-        debug: isDev,
-        providers: {
-          ga4: ga4Config,
-          posthog: postHogConfig,
-        },
+  ({ children, ga4Config, postHogConfig, xAdsConfig }: Props) => {
+    useEffect(() => {
+      scheduleIdle(() => {
+        void loadAnalytics({ ga4: ga4Config, posthog: postHogConfig, xAds: xAdsConfig });
       });
+    }, [ga4Config, postHogConfig, xAdsConfig]);
 
-      return analyticsInstance;
-    }, []);
-
-    if (!analytics) return children;
-
-    return (
-      <AnalyticsProvider
-        client={analytics}
-        onInitializeSuccess={() => {
-          analyticsInstance?.setGlobalContext({
-            platform: isDesktop ? 'desktop' : 'web',
-          });
-
-          analyticsInstance
-            ?.getProvider('posthog')
-            ?.getNativeInstance()
-            ?.register({
-              platform: isDesktop ? 'desktop' : 'web',
-            });
-        }}
-      >
-        {children}
-      </AnalyticsProvider>
-    );
+    return children;
   },
   () => true,
 );

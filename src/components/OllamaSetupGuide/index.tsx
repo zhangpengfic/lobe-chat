@@ -1,10 +1,12 @@
-import { ProviderCombine } from '@lobehub/icons';
-import { Flexbox, Highlighter, Snippet, Tabs } from '@lobehub/ui';
+import { Flexbox, Highlighter, Snippet } from '@lobehub/ui';
+import { Tabs } from '@lobehub/ui/base-ui';
 import { Steps } from 'antd';
 import { createStaticStyles, cssVar } from 'antd-style';
 import { readableColor } from 'polished';
 import React, { memo, useMemo } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
+
+import { ProviderCombine } from '@/components/LobeIcons';
 
 const prefixCls = 'ant';
 
@@ -44,7 +46,6 @@ const SetupGuide = memo(() => {
     <>
       <ProviderCombine provider={'ollama'} size={30} style={{ marginBottom: -8, marginLeft: 4 }} />
       <Tabs
-        compact
         items={[
           {
             children: (

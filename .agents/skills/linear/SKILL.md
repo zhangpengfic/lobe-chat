@@ -1,81 +1,100 @@
 ---
 name: linear
-description: "Linear issue management. MUST USE when: (1) user mentions LOBE-xxx issue IDs (e.g. LOBE-4540), (2) user says 'linear', 'linear issue', 'link linear', (3) creating PRs that reference Linear issues. Provides workflows for retrieving issues, updating status, and adding comments."
+description: 'Use for Linear issues, LOBE-xxx links, status updates, completion comments and sub-issue trees.'
+user-invocable: false
 ---
 
 # Linear Issue Management
 
-Before using Linear workflows, search for `linear` MCP tools. If not found, treat as not installed.
-
-## ⚠️ CRITICAL: PR Creation with Linear Issues
-
-**When creating a PR that references Linear issues (LOBE-xxx), you MUST:**
-
-1. Create the PR with magic keywords (`Fixes LOBE-xxx`)
-2. **IMMEDIATELY after PR creation**, add completion comments to ALL referenced Linear issues
-3. Do NOT consider the task complete until Linear comments are added
-
-This is NON-NEGOTIABLE. Skipping Linear comments is a workflow violation.
+Before using Linear workflows, discover the available Linear tools, including deferred tools, and inspect their current schemas. Select tools by capability (issue lookup, images, sub-issues, create/update, comments), not a fixed MCP prefix or historical tool name. Report a missing capability only after discovery.
 
 ## Workflow
 
-1. **Retrieve issue details** before starting: `mcp__linear-server__get_issue`
-2. **Read images**: If the issue description contains images, MUST use `mcp__linear-server__extract_images` to read image content for full context
-3. **Check for sub-issues**: Use `mcp__linear-server__list_issues` with `parentId` filter
-4. **Mark as In Progress**: When starting to plan or implement an issue, immediately update status to **"In Progress"** via `mcp__linear-server__update_issue`
-5. **Update issue status** when completing: `mcp__linear-server__update_issue`
-6. **Add completion comment** (REQUIRED): `mcp__linear-server__create_comment`
+1. **Retrieve issue details** before starting using the issue lookup capability.
+2. **Read images** — issue descriptions often contain screenshots with critical context (mockups, error states, before/after). Use the available image extraction or viewing capability; reading raw markdown alone misses what the reporter was looking at.
+3. **Check for sub-issues** using the available parent filter or issue relation fields.
+4. **Mark as In Progress** at the moment you start planning or implementing — this signals to teammates the issue is owned, so they don't double-pick it up.
+5. Follow [Per-Issue Completion](#per-issue-completion) before moving to the next issue.
 
 ## Creating Issues
 
-When creating issues with `mcp__linear-server__create_issue`, **MUST add the `claude code` label**.
+When creating issues, add the `claude code` label. Reason: the label is how the team filters/audits AI-generated issues; without it those issues vanish into the general backlog and the team loses visibility into AI contribution patterns.
 
-## Completion Comment Format
+Unless the user explicitly specifies another assignee or asks for the issue to remain unassigned, pass `assignee: "me"` so the issue is assigned to the authenticated Linear user. Always honor explicit assignment instructions over this default.
 
-Every completed issue MUST have a comment summarizing work done:
+## Language
 
-```markdown
-## Changes Summary
+Match the issue language to the conversation that produced it — if you're discussing in 中文，write the issue in 中文；if discussing in English, write it in English. Reason: the issue is a continuation of the conversation, and forcing a language switch creates translation friction for the collaborator who started the thread.
 
-- **Feature**: Brief description of what was implemented
-- **Files Changed**: List key files modified
-- **PR**: #xxx or PR URL
+Specifics:
 
-### Key Changes
+- 中文 conversation → 中文 body; technical terms (file paths, identifiers, library names, commands, error messages) stay in English.
+- English conversation → English body.
+- Code blocks, file paths, and quoted strings always stay in their original form regardless of surrounding language.
+- This applies equally to **updates** — when editing an existing issue (description **and titles**), preserve the language of the conversation that triggered the edit; don't switch the issue language mid-refactor.
 
-- Change 1
-- Change 2
-- ...
+## Creating Sub-issue Trees
+
+When breaking a parent issue into a tree of sub-issues (e.g., task decomposition for LOBE-xxx), follow these conventions and check the available tool capabilities.
+
+### 1. Prefix titles with an ordering index
+
+Linear supports sub-issue ordering, but tool support varies. Check the discovered create/update schema for ordering fields rather than assuming a particular MCP tool exposes them.
+
+Workaround: encode execution order in the title itself:
+
+```plaintext
+[1]     [db]       add schema fields
+[2]     [db]       new table + repository
+[3]     [service]  business logic layer
+[4]     [api]      REST endpoints
+[4.1]   [sdk]      client SDK wrapper
+[4.1.1] [app]      consumer integration
+[4.1.2] [app]      UI surface
+[4.2]   [ui]       dashboard page
 ```
 
-This is critical for:
+Even when the panel shuffles, the reader can mentally reconstruct the dependency graph at a glance. Dotted numbering `[n.m.k]` should mirror the parent-child nesting so the index and the tree agree.
 
-- Team visibility
-- Code review context
-- Future reference
+### 2. Nest sub-issues by logical parent-child, not flat under the root
 
-## PR Association (REQUIRED)
+Linear supports **unlimited sub-issue depth**. A flat list of 8+ siblings under one root is hard to scan. Group by main-subordinate logic:
 
-When creating PRs for Linear issues, include magic keywords in PR body:
+- Core service → its SDK → SDK consumers
+- Don't create a sibling when a child is more accurate
 
-- `Fixes LOBE-123`
-- `Closes LOBE-123`
-- `Resolves LOBE-123`
+Set the parent relation when creating or moving an issue using the discovered schema (for example, `parentId: "LOBE-xxxx"` when supported). Moving the parent does not require rewriting `blockedBy` relations.
 
-## Per-Issue Completion Rule
+### 3. Sub-issue creation order is dictated by `blockedBy`
 
-When working on multiple issues, update EACH issue IMMEDIATELY after completing it:
+`blockedBy` requires the blocker to exist first (you need its LOBE-id). So:
 
-1. Complete implementation
-2. Run `bun run type-check`
-3. Run related tests
-4. Create PR if needed
-5. Update status to **"In Review"** (NOT "Done")
-6. **Add completion comment immediately**
-7. Move to next issue
+1. **Topologically sort** the DAG — leaves (no deps) first, roots last
+2. Create issues with zero deps in the first wave
+3. Create dependent issues only after collecting the blocker IDs from prior responses
+4. `blockedBy` is **append-only**; passing it again does not overwrite — safe to re-run
 
-**Note:** Status → "In Review" when PR created. "Done" only after PR merged.
+### 4. Respect dependency order
 
-**❌ Wrong:** Complete all → Create PR → Forget Linear comments
+Collect blocker IDs before creating dependent issues. Do not assume parallel execution from how tool calls appear in a message; use the active tool's supported execution behavior.
 
-**✅ Correct:** Complete → Create PR → Add Linear comments → Task done
+### 5. Keep each sub-issue description self-contained
+
+Each sub-issue should state:
+
+- Goal (1–2 lines)
+- Key files to touch
+- Concrete changes / acceptance criteria
+- Dependencies (link to blocker issues by `LOBE-xxxx`)
+- Validation steps
+
+The implementer may open only the sub-issue, not the parent — don't rely on context that lives only in the parent description.
+
+## Per-Issue Completion
+
+Close out each issue before starting the next; do not defer all Linear updates to the end. Reuse existing authorization for that issue's status updates and comments without asking again.
+
+1. Complete implementation and the repository-required checks, including related tests; follow the Quality Check section of the repository's `AGENTS.md` (`bun run check` in LobeHub).
+2. Create a PR when needed using the **pr** skill. Include `Fixes LOBE-123` (or `Closes` / `Resolves`) in the PR body so Linear can link it and close the issue on merge.
+3. Update the issue to **In Review** while its PR awaits merge, then **Done** after merge. For work that needs no PR, mark **Done** when its outcome and verification are complete.
+4. Proactively add or update a concise completion comment with the resulting behavior, important changes, validation, and PR link. PR linkage does not replace this human-readable summary. If an existing comment already covers the same result, do not post a duplicate.

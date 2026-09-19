@@ -1,11 +1,10 @@
 import type { SWRResponse } from 'swr';
 
 import { mutate, useClientDataSWR } from '@/libs/swr';
+import { evalKeys } from '@/libs/swr/keys';
 import { agentEvalService } from '@/services/agentEval';
 import type { EvalStore } from '@/store/eval/store';
 import { type StoreSetter } from '@/store/types';
-
-const FETCH_TEST_CASES_KEY = 'FETCH_TEST_CASES';
 
 type Setter = StoreSetter<EvalStore>;
 
@@ -22,6 +21,10 @@ export class TestCaseActionImpl {
     this.#get = get;
   }
 
+  getTestCaseById = (id: string): any | undefined => {
+    return this.#get().testCaseDetailCache[id];
+  };
+
   getTestCasesByDatasetId = (datasetId: string): any[] => {
     return this.#get().testCasesCache[datasetId]?.data || [];
   };
@@ -36,7 +39,47 @@ export class TestCaseActionImpl {
 
   refreshTestCases = async (datasetId: string): Promise<void> => {
     await mutate(
-      (key) => Array.isArray(key) && key[0] === FETCH_TEST_CASES_KEY && key[1] === datasetId,
+      (key) => Array.isArray(key) && key[0] === evalKeys.testCases.root && key[1] === datasetId,
+    );
+  };
+
+  /**
+   * Edit a case definition in place. The dataset list is revalidated too: its
+   * rows render the same input and expected answer, so leaving it alone shows a
+   * stale row the moment you navigate back.
+   */
+  updateTestCase = async (
+    id: string,
+    datasetId: string,
+    data: {
+      content?: { expected?: string; input?: string };
+      evalConfig?: { criteria?: string };
+    },
+  ): Promise<void> => {
+    await agentEvalService.updateTestCase({ id, ...data });
+    await mutate(evalKeys.testCaseDetail(id));
+    await this.refreshTestCases(datasetId);
+  };
+
+  /**
+   * A test case on its own, not as a row of a dataset page — the case detail
+   * route is reachable directly, so it cannot rely on the list being loaded.
+   */
+  useFetchTestCase = (id?: string): SWRResponse => {
+    return useClientDataSWR(
+      id ? evalKeys.testCaseDetail(id) : null,
+      () => agentEvalService.getTestCase(id!),
+      {
+        onSuccess: (data: any) => {
+          this.#set(
+            (state) => ({
+              testCaseDetailCache: { ...state.testCaseDetailCache, [data.id]: data },
+            }),
+            false,
+            `useFetchTestCase/success/${id}`,
+          );
+        },
+      },
     );
   };
 
@@ -48,7 +91,7 @@ export class TestCaseActionImpl {
     const { datasetId, limit = 10, offset = 0 } = params;
 
     return useClientDataSWR(
-      datasetId ? [FETCH_TEST_CASES_KEY, datasetId, limit, offset] : null,
+      datasetId ? evalKeys.testCases(datasetId, limit, offset) : null,
       () => agentEvalService.listTestCases({ datasetId, limit, offset }),
       {
         onSuccess: (data: any) => {

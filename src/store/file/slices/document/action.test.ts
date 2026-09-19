@@ -1,3 +1,8 @@
+import {
+  CUSTOM_DOCUMENT_FILE_TYPE,
+  CUSTOM_FOLDER_FILE_TYPE,
+  DERIVED_DOCUMENT_SOURCE_TYPE,
+} from '@lobechat/const';
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -7,8 +12,6 @@ import { type ResourceItem } from '@/types/resource';
 
 import { useFileStore as useStore } from '../../store';
 import { getResourceQueryKey } from '../resource/utils';
-
-vi.mock('zustand/traditional');
 
 vi.mock('@/services/document', () => ({
   documentService: {
@@ -24,7 +27,7 @@ const createDocumentFixture = (overrides: Partial<LobeDocument> = {}): LobeDocum
   content: 'Body',
   createdAt: new Date('2024-01-01T00:00:00.000Z'),
   editorData: {},
-  fileType: 'custom/document',
+  fileType: CUSTOM_DOCUMENT_FILE_TYPE,
   filename: 'Old title',
   id: 'doc-1',
   metadata: {},
@@ -41,14 +44,14 @@ const createResourceFixture = (overrides: Partial<ResourceItem> = {}): ResourceI
   content: 'Body',
   createdAt: new Date('2024-01-01T00:00:00.000Z'),
   editorData: {},
-  fileType: 'custom/document',
+  fileType: CUSTOM_DOCUMENT_FILE_TYPE,
   id: 'doc-1',
   knowledgeBaseId: 'kb-1',
   metadata: {},
   name: 'Old title',
   parentId: null,
   size: 4,
-  sourceType: 'document',
+  sourceType: DERIVED_DOCUMENT_SOURCE_TYPE,
   title: 'Old title',
   updatedAt: new Date('2024-01-01T00:00:00.000Z'),
   url: 'document',
@@ -82,7 +85,7 @@ describe('DocumentAction', () => {
       content: '',
       createdAt: new Date('2024-01-01T00:00:00.000Z'),
       editorData: '{}',
-      fileType: 'custom/folder',
+      fileType: CUSTOM_FOLDER_FILE_TYPE,
       id: 'folder-1',
       metadata: {},
       parentId: null,
@@ -111,13 +114,13 @@ describe('DocumentAction', () => {
 
     expect(useStore.getState().resourceList.map((item) => item.id)).toEqual(['folder-1']);
     expect(useStore.getState().resourceMap.get('folder-1')).toMatchObject({
-      fileType: 'custom/folder',
+      fileType: CUSTOM_FOLDER_FILE_TYPE,
       id: 'folder-1',
       knowledgeBaseId: 'kb-1',
       name: 'New Folder',
       parentId: null,
       slug: 'new-folder',
-      sourceType: 'document',
+      sourceType: DERIVED_DOCUMENT_SOURCE_TYPE,
       title: 'New Folder',
     });
   });
@@ -127,7 +130,10 @@ describe('DocumentAction', () => {
     const existingDocument = createDocumentFixture();
     const existingResource = createResourceFixture();
 
-    vi.mocked(documentService.updateDocument).mockResolvedValue(undefined);
+    vi.mocked(documentService.updateDocument).mockResolvedValue({
+      historyAppended: false,
+      id: 'doc-1',
+    });
 
     act(() => {
       useStore.setState(
@@ -175,10 +181,11 @@ describe('DocumentAction', () => {
     const existingDocument = createDocumentFixture();
     const existingResource = createResourceFixture();
 
-    let resolveUpdate: (() => void) | undefined;
+    let resolveUpdate:
+      ((value: { historyAppended: boolean; id: string; savedAt?: string }) => void) | undefined;
     vi.mocked(documentService.updateDocument).mockImplementation(
       () =>
-        new Promise<void>((resolve) => {
+        new Promise((resolve) => {
           resolveUpdate = resolve;
         }),
     );
@@ -215,7 +222,7 @@ describe('DocumentAction', () => {
       title: 'Optimistic title',
     });
 
-    resolveUpdate?.();
+    resolveUpdate?.({ historyAppended: false, id: 'doc-1' });
 
     await act(async () => {
       await pendingUpdate;
@@ -226,6 +233,65 @@ describe('DocumentAction', () => {
       title: 'Optimistic title',
     });
     expect(useStore.getState().resourceMap.get('doc-1')?._optimistic).toBeUndefined();
+  });
+
+  it('does not send content or editorData when Page Agent editTitle follows initPage', async () => {
+    const { result } = renderHook(() => useStore());
+    const initializedEditorData = {
+      root: {
+        children: [{ children: [], type: 'paragraph', version: 1 }],
+        type: 'root',
+        version: 1,
+      },
+    };
+
+    vi.mocked(documentService.updateDocument).mockResolvedValue({
+      historyAppended: false,
+      id: 'doc-1',
+    });
+
+    act(() => {
+      useStore.setState(
+        {
+          documents: [
+            createDocumentFixture({
+              content: '',
+              editorData: {},
+            }),
+          ],
+        },
+        false,
+      );
+    });
+
+    await act(async () => {
+      await result.current.updateDocumentOptimistically('doc-1', {
+        content: 'Body written by page agent.',
+        editorData: initializedEditorData,
+      });
+    });
+
+    await act(async () => {
+      await result.current.updateDocumentOptimistically('doc-1', {
+        metadata: { emoji: 'page' },
+        title: 'Final title',
+      });
+    });
+
+    expect(documentService.updateDocument).toHaveBeenNthCalledWith(1, {
+      content: 'Body written by page agent.',
+      editorData: JSON.stringify(initializedEditorData),
+      id: 'doc-1',
+      metadata: {},
+      parentId: undefined,
+      title: 'Old title',
+    });
+    expect(documentService.updateDocument).toHaveBeenNthCalledWith(2, {
+      id: 'doc-1',
+      metadata: { emoji: 'page' },
+      parentId: undefined,
+      title: 'Final title',
+    });
   });
 
   it('reverts optimistic resource updates when the sync fails', async () => {

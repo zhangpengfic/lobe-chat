@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { LayersEnum, RelationshipEnum, UserMemoryContextObjectType } from '@lobechat/types';
 import { eq } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getTestDB } from '../../../core/getTestDB';
@@ -15,7 +16,7 @@ import {
 import type { LobeChatDatabase } from '../../../type';
 import { UserMemoryModel } from '../model';
 import type { LayerBaseMemorySignals } from '../query';
-import { scoreHybridCandidates } from '../query';
+import { buildBm25MatchCondition, scoreHybridCandidates } from '../query';
 
 const userId = 'memory-query-test-user';
 
@@ -72,6 +73,7 @@ const createActivityPair = async (opts: {
 };
 
 const createContextPair = async (opts: {
+  currentStatus?: string;
   description?: string;
   memoryTags?: string[];
   tags?: string[];
@@ -95,6 +97,7 @@ const createContextPair = async (opts: {
     .insert(userMemoriesContexts)
     .values({
       associatedObjects: [{ name: 'Linear', type: UserMemoryContextObjectType.Application }],
+      currentStatus: opts.currentStatus,
       description: opts.description ?? 'A context description',
       tags: opts.tags,
       title: opts.title ?? 'Atlas context',
@@ -305,6 +308,46 @@ describe('user memory query layer', () => {
   });
 
   describe('searchMemory', () => {
+    it('uses external candidates only for the lexical leg and rechecks PostgreSQL rows', async () => {
+      const { activity } = await createActivityPair({ title: 'External lexical activity' });
+      const ftsSearchCandidates = vi.fn().mockResolvedValue({
+        candidates: [
+          { id: 'deleted-activity', score: 10 },
+          { id: activity.id, score: 8 },
+        ],
+        total: 2,
+      });
+      const model = new UserMemoryModel(serverDB, userId, {
+        ftsSearchCandidateEnabled: true,
+        ftsSearchCandidates,
+      });
+
+      const result = await model.searchMemory({
+        layers: [LayersEnum.Activity],
+        queries: ['external candidate'],
+        status: ['completed'],
+        topK: { activities: 5, contexts: 0, experiences: 0, identities: 0, preferences: 0 },
+      });
+
+      expect(result.activities.map(({ id }) => id)).toEqual([activity.id]);
+      expect(ftsSearchCandidates).toHaveBeenCalledWith({
+        entity: 'memoryActivities',
+        filters: { memoryStatus: ['completed'] },
+        pagination: { limit: 15 },
+        query: {
+          fields: [
+            'parent_title',
+            'parent_summary',
+            'parent_details',
+            'narrative',
+            'notes',
+            'feedback',
+          ],
+          text: 'external candidate',
+        },
+      });
+    });
+
     it('requires all requested tags to match during lexical filter-only search', async () => {
       const { activity: exactMatch } = await createActivityPair({
         memoryTags: ['atlas', 'urgent'],
@@ -324,6 +367,19 @@ describe('user memory query layer', () => {
       });
 
       expect(result.activities.map((item) => item.id)).toEqual([exactMatch.id]);
+    });
+
+    it('applies context status during lexical filter-only search', async () => {
+      const { context: active } = await createContextPair({ currentStatus: 'active' });
+      await createContextPair({ currentStatus: 'archived' });
+
+      const result = await memoryModel.searchMemory({
+        layers: [LayersEnum.Context],
+        status: ['active'],
+        topK: { activities: 0, contexts: 5, experiences: 0, identities: 0, preferences: 0 },
+      });
+
+      expect(result.contexts.map((item) => item.id)).toEqual([active.id]);
     });
 
     it('does not execute retrieval for layers with topK set to zero', async () => {
@@ -367,6 +423,30 @@ describe('user memory query layer', () => {
 
       expect(lexicalSpy).toHaveBeenCalledOnce();
       expect(semanticSpy).toHaveBeenCalledOnce();
+    });
+
+    it('skips the lexical leg for long context when semantic retrieval is available', async () => {
+      const ftsSearchCandidates = vi.fn().mockResolvedValue({ candidates: [], total: 0 });
+      const model = new UserMemoryModel(serverDB, userId, {
+        ftsSearchCandidateEnabled: true,
+        ftsSearchCandidates,
+      });
+      const queryModel = Reflect.get(model, 'queryModel') as {
+        searchActivitiesSemantic: (...args: unknown[]) => Promise<unknown[]>;
+      };
+      const semanticSpy = vi.spyOn(queryModel, 'searchActivitiesSemantic').mockResolvedValue([]);
+
+      await model.searchMemory(
+        {
+          layers: [LayersEnum.Activity],
+          queries: ['对话'.repeat(200)],
+          topK: { activities: 2, contexts: 0, experiences: 0, identities: 0, preferences: 0 },
+        },
+        [[0.1, 0.2, 0.3]],
+      );
+
+      expect(semanticSpy).toHaveBeenCalledOnce();
+      expect(ftsSearchCandidates).not.toHaveBeenCalled();
     });
 
     it('deduplicates contexts before applying the lexical candidate limit', async () => {
@@ -479,5 +559,31 @@ describe('user memory query layer', () => {
 
       expect(result.identities.map((item) => item.id)).toEqual([expectedIdentity.id]);
     });
+  });
+});
+
+describe('buildBm25MatchCondition', () => {
+  it('should build a ParadeDB boolean match query with field/value parameters', () => {
+    const condition = buildBm25MatchCondition("I'm checking customers' needs AND OR NOT", [
+      { fields: ['title', 'summary'], keyColumn: userMemories.id },
+      { fields: ['description', 'role'], keyColumn: userMemoriesIdentities.id },
+    ]);
+
+    const dialect = new PgDialect();
+    const built = dialect.sqlToQuery(condition!);
+
+    expect(built.sql).toBe(
+      '("user_memories"."id" @@@ paradedb.boolean(should => ARRAY[paradedb.match($1, $2, conjunction_mode => true), paradedb.match($3, $4, conjunction_mode => true)]) or "user_memories_identities"."id" @@@ paradedb.boolean(should => ARRAY[paradedb.match($5, $6, conjunction_mode => true), paradedb.match($7, $8, conjunction_mode => true)]))',
+    );
+    expect(built.params).toStrictEqual([
+      'title',
+      "I'm checking customers' needs",
+      'summary',
+      "I'm checking customers' needs",
+      'description',
+      "I'm checking customers' needs",
+      'role',
+      "I'm checking customers' needs",
+    ]);
   });
 });

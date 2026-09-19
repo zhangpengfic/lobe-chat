@@ -41,16 +41,6 @@ export interface ChatOperationState {
    * or by triggering a new sendMessage when no operation is running.
    */
   queuedMessages: Record<string, QueuedMessage[]>;
-
-  /**
-   * Agent IDs with unread completed generation
-   */
-  unreadCompletedAgentIds: Set<string>;
-
-  /**
-   * Topic IDs with unread completed generation
-   */
-  unreadCompletedTopicIds: Set<string>;
 }
 
 export const initialOperationState: ChatOperationState = {
@@ -60,6 +50,4 @@ export const initialOperationState: ChatOperationState = {
   operationsByMessage: {},
   operationsByType: {} as Record<OperationType, string[]>,
   queuedMessages: {},
-  unreadCompletedAgentIds: new Set(),
-  unreadCompletedTopicIds: new Set(),
 };

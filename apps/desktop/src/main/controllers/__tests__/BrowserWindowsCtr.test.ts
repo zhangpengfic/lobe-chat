@@ -29,7 +29,15 @@ const mockCloseWindow = vi.fn();
 const mockMinimizeWindow = vi.fn();
 const mockMaximizeWindow = vi.fn();
 const mockIsWindowMaximized = vi.fn();
+const mockIsWindowFullScreen = vi.fn();
 const mockRetrieveByIdentifier = vi.fn();
+const mockGetWindowSize = vi.fn();
+const mockShowCreatedWindow = vi.fn();
+const mockCreateMultiInstanceWindow = vi.fn(() => ({
+  browser: { show: mockShowCreatedWindow },
+  identifier: 'workspace_workspace-1',
+}));
+const mockStartSession = vi.fn();
 const testSenderIdentifierString: string = 'test-window-event-id';
 
 const mockGetIdentifierByWebContents = vi.fn(() => testSenderIdentifierString);
@@ -57,6 +65,9 @@ const mockApp = {
     minimizeWindow: mockMinimizeWindow,
     maximizeWindow: mockMaximizeWindow,
     isWindowMaximized: mockIsWindowMaximized,
+    isWindowFullScreen: mockIsWindowFullScreen,
+    getWindowSize: mockGetWindowSize,
+    createMultiInstanceWindow: mockCreateMultiInstanceWindow,
     retrieveByIdentifier: mockRetrieveByIdentifier.mockImplementation(
       (identifier: AppBrowsersIdentifiers | string) => {
         if (identifier === 'some-other-window') {
@@ -65,6 +76,9 @@ const mockApp = {
         return { show: mockShowOther }; // Default mock for other identifiers
       },
     ),
+  },
+  screenCaptureManager: {
+    startSession: mockStartSession,
   },
 } as unknown as App;
 
@@ -78,10 +92,21 @@ describe('BrowserWindowsCtr', () => {
   });
 
   describe('toggleMainWindow', () => {
-    it('should get the main window and toggle its visibility', async () => {
-      await browserWindowsCtr.toggleMainWindow();
+    it('should toggle the main window visibility', () => {
+      browserWindowsCtr.toggleMainWindow();
+
       expect(mockGetMainWindow).toHaveBeenCalled();
       expect(mockToggleVisible).toHaveBeenCalled();
+      expect(mockStartSession).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('openQuickComposer', () => {
+    it('should start the quick composer session', async () => {
+      await browserWindowsCtr.openQuickComposer();
+      expect(mockStartSession).toHaveBeenCalled();
+      expect(mockGetMainWindow).not.toHaveBeenCalled();
+      expect(mockToggleVisible).not.toHaveBeenCalled();
     });
   });
 
@@ -148,6 +173,48 @@ describe('BrowserWindowsCtr', () => {
       expect(mockGetIdentifierByWebContents).toHaveBeenCalledWith(context.sender);
       expect(mockIsWindowMaximized).toHaveBeenCalledWith(testSenderIdentifierString);
       expect(result).toBe(true);
+    });
+  });
+
+  describe('isWindowFullScreen', () => {
+    it('should return fullscreen state for the sender window', () => {
+      mockIsWindowFullScreen.mockReturnValueOnce(true);
+
+      const sender = {} as any;
+      const context = { sender, event: { sender } as any } as IpcContext;
+      const result = runWithIpcContext(context, () => browserWindowsCtr.isWindowFullScreen());
+
+      expect(mockGetIdentifierByWebContents).toHaveBeenCalledWith(context.sender);
+      expect(mockIsWindowFullScreen).toHaveBeenCalledWith(testSenderIdentifierString);
+      expect(result).toBe(true);
+    });
+  });
+
+  describe('createMultiInstanceWindow', () => {
+    it('should inherit the calling window dimensions when requested', async () => {
+      const sender = {} as any;
+      const context = { sender, event: { sender } as any } as IpcContext;
+      mockGetWindowSize.mockReturnValue({ height: 800, width: 1200, x: 10, y: 20 });
+
+      const result = await runWithIpcContext(context, () =>
+        browserWindowsCtr.createMultiInstanceWindow({
+          inheritCurrentWindowSize: true,
+          path: '/lobe-team',
+          templateId: 'chatSingle',
+          uniqueId: 'workspace_workspace-1',
+        }),
+      );
+
+      expect(mockGetIdentifierByWebContents).toHaveBeenCalledWith(sender);
+      expect(mockGetWindowSize).toHaveBeenCalledWith(testSenderIdentifierString);
+      expect(mockCreateMultiInstanceWindow).toHaveBeenCalledWith(
+        'chatSingle',
+        '/lobe-team',
+        'workspace_workspace-1',
+        { height: 800, width: 1200 },
+      );
+      expect(mockShowCreatedWindow).toHaveBeenCalledOnce();
+      expect(result).toEqual({ success: true, windowId: 'workspace_workspace-1' });
     });
   });
 

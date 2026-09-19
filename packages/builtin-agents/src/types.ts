@@ -1,4 +1,4 @@
-import type { LobeAgentChatConfig, LobeAgentConfig } from '@lobechat/types';
+import type { LobeAgentAgencyConfig, LobeAgentChatConfig, LobeAgentConfig } from '@lobechat/types';
 
 import type { GroupSupervisorContext } from './agents/group-supervisor/type';
 
@@ -10,7 +10,15 @@ export const BUILTIN_AGENT_SLUGS = {
   groupAgentBuilder: 'group-agent-builder',
   groupSupervisor: 'group-supervisor',
   inbox: 'inbox',
+  nightlyReview: 'nightly-review',
+  onboardingUnderstanding: 'onboarding-understanding',
+  onboardingTaskRecommender: 'onboarding-task-recommender',
   pageAgent: 'page-agent',
+  selfFeedbackIntent: 'self-feedback-intent',
+  selfReflection: 'self-reflection',
+  skillManagement: 'skill-management',
+  taskAgent: 'task-agent',
+  verifyAgent: 'verify-agent',
   webOnboarding: 'web-onboarding',
 } as const;
 
@@ -32,6 +40,9 @@ export interface BuiltinAgentPersistConfig {
  * Runtime Result - dynamically generated config, not persisted
  */
 export interface BuiltinAgentRuntimeResult {
+  /** Runtime agency configuration overrides */
+  agencyConfig?: Partial<LobeAgentAgencyConfig>;
+
   /** Runtime chat configuration overrides */
   chatConfig?: Partial<LobeAgentChatConfig>;
 
@@ -46,6 +57,16 @@ export interface BuiltinAgentRuntimeResult {
  * Runtime Context - context passed to runtime function
  */
 export interface RuntimeContext {
+  /**
+   * The agent's personal name as the user sees it (e.g. a renamed default
+   * assistant). Builtin system roles should introduce themselves by this name
+   * instead of the hardcoded product default.
+   */
+  agentName?: string;
+
+  /** The agent's role title ("Health Assistant"), shown alongside the name. */
+  agentTitle?: string;
+
   /** Document content for PageAgent */
   documentContent?: string;
 
@@ -74,8 +95,7 @@ export interface RuntimeContext {
  * - Object: BuiltinAgentRuntimeResult (static config)
  */
 export type BuiltinAgentRuntimeConfig =
-  | ((ctx: RuntimeContext) => BuiltinAgentRuntimeResult)
-  | BuiltinAgentRuntimeResult;
+  ((ctx: RuntimeContext) => BuiltinAgentRuntimeResult) | BuiltinAgentRuntimeResult;
 
 /**
  * Builtin Agent Definition - complete definition with persist and runtime parts

@@ -1,7 +1,8 @@
 'use client';
 
 import { type UIChatMessage } from '@lobechat/types';
-import { Flexbox, Tag } from '@lobehub/ui';
+import { Flexbox } from '@lobehub/ui';
+import { Tag } from '@lobehub/ui/base-ui';
 import isEqual from 'fast-deep-equal';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -16,10 +17,9 @@ import TaskItem from './TaskItem';
 
 interface TasksMessageProps {
   id: string;
-  index: number;
 }
 
-const TasksMessage = memo<TasksMessageProps>(({ id, index }) => {
+const TasksMessage = memo<TasksMessageProps>(({ id }) => {
   const { t } = useTranslation('chat');
   const item = useConversationStore(dataSelectors.getDisplayMessageById(id), isEqual)!;
   const actionsConfig = useConversationStore((s) => s.actionsBar?.assistant);
@@ -39,6 +39,7 @@ const TasksMessage = memo<TasksMessageProps>(({ id, index }) => {
     <ChatItem
       showTitle
       aboveMessage={null}
+      actions={<AssistantActionsBar actionsConfig={actionsConfig} data={item} id={id} />}
       avatar={avatar}
       customAvatarRender={(_, node) => <TaskAvatar>{node}</TaskAvatar>}
       id={id}
@@ -46,9 +47,6 @@ const TasksMessage = memo<TasksMessageProps>(({ id, index }) => {
       placement="left"
       time={createdAt}
       titleAddon={<Tag>{t('task.batchTasks', { count: tasks.length })}</Tag>}
-      actions={
-        <AssistantActionsBar actionsConfig={actionsConfig} data={item} id={id} index={index} />
-      }
     >
       <Flexbox gap={8} width={'100%'}>
         {tasks.map((task) => (

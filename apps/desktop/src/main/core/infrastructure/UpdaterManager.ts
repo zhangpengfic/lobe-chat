@@ -8,10 +8,12 @@ import type {
 import { app as electronApp } from 'electron';
 import log from 'electron-log';
 import { autoUpdater } from 'electron-updater';
+import semver from 'semver';
 
 import { isDev, isWindows } from '@/const/env';
 import { getDesktopEnv } from '@/env';
 import { UPDATE_CHANNEL, UPDATE_SERVER_URL, updaterConfig } from '@/modules/updater/configs';
+import { extractRestoreRoute } from '@/modules/updater/utils';
 import { createLogger } from '@/utils/logger';
 
 import type { App as AppCore } from '../App';
@@ -32,6 +34,14 @@ export class UpdaterManager {
   private activeGeneration: number = 0;
   /** Whether a recheck is needed after the current check completes */
   private pendingRecheck: boolean = false;
+  /**
+   * Version the user acknowledged with "install later" in the current process.
+   * While set, equal-version update-available/downloaded events are processed
+   * for menu state but never re-broadcast to the renderer, so the prompt does
+   * not reappear within the session. Cleared when a strictly newer version
+   * arrives (or on channel switch).
+   */
+  private installLaterVersion: string | null = null;
 
   private stage: UpdaterStage = 'idle';
   private latestUpdateInfo: UpdateInfo | null = null;
@@ -102,7 +112,6 @@ export class UpdaterManager {
 
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = false;
-    autoUpdater.allowDowngrade = false;
 
     const useDevConfig = isDev || FORCE_DEV_UPDATE_CONFIG;
     if (useDevConfig) {
@@ -118,6 +127,10 @@ export class UpdaterManager {
       );
       this.configureUpdateProvider();
     }
+
+    // Keep every release channel rollback-capable. Assign this after configuring the provider because
+    // electron-updater's channel setter mutates allowDowngrade as a side effect.
+    autoUpdater.allowDowngrade = true;
 
     this.registerEvents();
 
@@ -139,14 +152,15 @@ export class UpdaterManager {
   public switchChannel = (channel: UpdateChannel) => {
     logger.info(`Switching update channel: ${this.currentChannel} -> ${channel}`);
 
-    const isDowngrade = this.currentChannel === 'canary' && channel === 'stable';
-
     this.currentChannel = channel;
-    autoUpdater.allowDowngrade = isDowngrade;
-    logger.info(`allowDowngrade=${isDowngrade}`);
-
     autoUpdater.allowPrerelease = channel !== 'stable';
     this.configureUpdateProvider();
+
+    // Reapply after configureUpdateProvider for the same channel-setter side effect as initialize.
+    autoUpdater.allowDowngrade = true;
+    logger.info('allowDowngrade=true');
+
+    this.installLaterVersion = null;
 
     this.mainWindow.broadcast('updateChannelChanged', channel);
 
@@ -239,11 +253,28 @@ export class UpdaterManager {
     }
   };
 
+  private captureRestoreRoute = () => {
+    try {
+      const url = this.mainWindow.webContents?.getURL();
+      if (!url) return;
+
+      const route = extractRestoreRoute(url);
+      if (!route) return;
+
+      this.app.storeManager.set('pendingRestoreRoute', route);
+      logger.info(`Captured route for restore after update restart: ${route}`);
+    } catch (error) {
+      logger.warn('Failed to capture route for restore after update restart:', error);
+    }
+  };
+
   /**
    * Install update immediately
    */
   public installNow = () => {
     logger.info('Installing update now...');
+
+    this.captureRestoreRoute();
 
     this.app.isQuiting = true;
 
@@ -274,6 +305,10 @@ export class UpdaterManager {
     logger.info('Update will be installed on next restart');
 
     autoUpdater.autoInstallOnAppQuit = true;
+    if (this.latestUpdateInfo?.version) {
+      this.installLaterVersion = this.latestUpdateInfo.version;
+      logger.info(`Suppressing further prompts for version ${this.installLaterVersion}`);
+    }
     this.mainWindow.broadcast('updateWillInstallLater');
   };
 
@@ -286,6 +321,7 @@ export class UpdaterManager {
     logger.info('Simulating update available...');
 
     const mockUpdateInfo: UpdateInfo = {
+      kind: 'app',
       releaseDate: new Date().toISOString(),
       releaseNotes: ` #### Version 1.0.0 Release Notes
 - Added some great new features
@@ -314,6 +350,7 @@ export class UpdaterManager {
     logger.info('Simulating update downloaded...');
 
     const mockUpdateInfo: UpdateInfo = {
+      kind: 'app',
       releaseDate: new Date().toISOString(),
       releaseNotes: ` #### Version 1.0.0 Release Notes
 - Added some great new features
@@ -326,7 +363,7 @@ export class UpdaterManager {
 
     this.downloading = false;
     this.setStage('downloaded', { updateInfo: mockUpdateInfo });
-    this.mainWindow.broadcast('updateDownloaded', mockUpdateInfo);
+    this.mainWindow.broadcast('updateReady', mockUpdateInfo);
   };
 
   /**
@@ -424,11 +461,20 @@ export class UpdaterManager {
 
       if (this.isStaleCheck()) return;
 
+      this.maybeClearInstallLaterGuard(info.version);
+
       this.updateAvailable = true;
+
+      if (this.installLaterVersion) {
+        logger.info(
+          `Skipping auto-download — install-later acknowledged for v${this.installLaterVersion}, incoming v${info.version}`,
+        );
+        return;
+      }
 
       // Always auto-download
       logger.info('Update found, starting download automatically...');
-      this.setStage('downloading', { updateInfo: info });
+      this.setStage('downloading', { updateInfo: { ...info, kind: 'app' } });
       this.downloadUpdate();
     });
 
@@ -479,11 +525,41 @@ export class UpdaterManager {
     autoUpdater.on('update-downloaded', (info) => {
       logger.info(`Update downloaded: ${info.version}`);
       this.downloading = false;
-      this.setStage('downloaded', { updateInfo: info });
-      this.mainWindow.broadcast('updateDownloaded', info);
+
+      this.maybeClearInstallLaterGuard(info.version);
+
+      const updateInfo = { ...info, kind: 'app' } satisfies UpdateInfo;
+      this.setStage('downloaded', { updateInfo });
+
+      if (this.installLaterVersion) {
+        logger.info(
+          `Not broadcasting updateReady — install-later acknowledged for v${this.installLaterVersion}, incoming v${info.version}`,
+        );
+        return;
+      }
+
+      this.mainWindow.broadcast('updateReady', updateInfo);
     });
 
     logger.debug('Updater events registered');
+  }
+
+  /**
+   * Clear the install-later guard when a strictly newer version arrives.
+   * Equal or older versions keep the guard so the prompt stays suppressed.
+   */
+  private maybeClearInstallLaterGuard(incomingVersion: string | undefined) {
+    if (!this.installLaterVersion || !incomingVersion) return;
+    try {
+      if (semver.gt(incomingVersion, this.installLaterVersion)) {
+        logger.info(
+          `Clearing install-later guard (was v${this.installLaterVersion}, incoming v${incomingVersion})`,
+        );
+        this.installLaterVersion = null;
+      }
+    } catch (error) {
+      logger.warn('Failed to compare versions for install-later guard:', error);
+    }
   }
 
   /** Check if the current active check has been superseded by a channel switch */
@@ -511,6 +587,7 @@ export class UpdaterManager {
   private getCurrentUpdateInfo(): UpdateInfo {
     const version = autoUpdater.currentVersion?.version || electronApp.getVersion();
     return {
+      kind: 'app',
       releaseDate: new Date().toISOString(),
       version,
     };

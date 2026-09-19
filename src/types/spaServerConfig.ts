@@ -10,6 +10,11 @@ export interface AnalyticsConfig {
   reactScan?: { apiKey: string };
   umami?: { scriptUrl: string; websiteId: string };
   vercel?: { debug: boolean; enabled: boolean };
+  xAds?: {
+    eventIds?: Record<string, string | undefined>;
+    pixelId: string;
+    purchaseEventId?: string;
+  };
 }
 
 export interface SPAClientEnv {
@@ -17,6 +22,14 @@ export interface SPAClientEnv {
   pyodideIndexUrl?: string;
   pyodidePipIndexUrl?: string;
   s3FilePath?: string;
+}
+
+export interface AuthSPAServerConfig {
+  analyticsConfig: AnalyticsConfig;
+  config: GlobalServerConfig;
+  enableOIDC: boolean;
+  featureFlags: Partial<IFeatureFlags>;
+  globalCDN?: boolean;
 }
 
 export interface SPAServerConfig {

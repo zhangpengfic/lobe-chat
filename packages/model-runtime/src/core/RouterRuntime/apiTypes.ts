@@ -3,11 +3,13 @@ import type { LobeRuntimeAI } from '../BaseAI';
 export type ApiType =
   | 'anthropic'
   | 'azure'
+  | 'azureopenai'
   | 'bedrock'
   | 'cloudflare'
   | 'deepseek'
   | 'fal'
   | 'google'
+  | 'meta'
   | 'minimax'
   | 'moonshot'
   | 'openai'

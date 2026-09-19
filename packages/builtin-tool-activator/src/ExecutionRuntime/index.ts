@@ -66,7 +66,28 @@ export class ActivatorExecutionRuntime {
       const manifests = await this.service.getToolManifests(toActivate);
 
       const foundIdentifiers = new Set(manifests.map((m) => m.identifier));
-      const notFound = toActivate.filter((id) => !foundIdentifiers.has(id));
+      const notFoundAsTools = toActivate.filter((id) => !foundIdentifiers.has(id));
+
+      // Fallback: try activating not-found identifiers as skills
+      const activatedSkillResults: BuiltinServerRuntimeOutput[] = [];
+      const notFound: string[] = [];
+
+      if (notFoundAsTools.length > 0 && this.service.activateSkill) {
+        for (const id of notFoundAsTools) {
+          try {
+            const skillResult = await this.service.activateSkill({ name: id });
+            if (skillResult.success) {
+              activatedSkillResults.push(skillResult);
+            } else {
+              notFound.push(id);
+            }
+          } catch {
+            notFound.push(id);
+          }
+        }
+      } else {
+        notFound.push(...notFoundAsTools);
+      }
 
       const activatedTools: ActivatedToolInfo[] = manifests.map((m) => ({
         apiCount: m.apiDescriptions.length,
@@ -84,18 +105,23 @@ export class ActivatorExecutionRuntime {
       const parts: string[] = [];
 
       if (activatedTools.length > 0) {
-        parts.push('Successfully activated tools:');
-        for (const manifest of manifests) {
-          parts.push(`\n## ${manifest.name} (${manifest.identifier})`);
-          if (manifest.systemRole) {
-            parts.push(manifest.systemRole);
-          }
-          if (manifest.apiDescriptions.length > 0) {
-            parts.push('\nAvailable APIs:');
-            for (const api of manifest.apiDescriptions) {
-              parts.push(`- **${api.name}**: ${api.description}`);
-            }
-          }
+        // Activation state flows through `state.activatedTools` and gets the
+        // manifest (systemRole + API schemas) injected into the system prompt
+        // from the next LLM call onwards, so the result only needs to list the
+        // newly callable APIs — returning the full docs here would double-carry
+        // them in every subsequent payload.
+        const apiNames = manifests.flatMap((manifest) =>
+          manifest.apiDescriptions.length > 0
+            ? manifest.apiDescriptions.map((api) => `${manifest.identifier}.${api.name}`)
+            : [manifest.identifier],
+        );
+        parts.push(`Successfully activated tools: ${apiNames.join(', ')}.`);
+        parts.push('Usage instructions for the activated items are in the system prompt.');
+      }
+
+      if (activatedSkillResults.length > 0) {
+        for (const skillResult of activatedSkillResults) {
+          parts.push(skillResult.content);
         }
       }
 
@@ -110,6 +136,7 @@ export class ActivatorExecutionRuntime {
       return {
         content: parts.join('\n'),
         state: {
+          activatedSkills: activatedSkillResults.map((r) => r.state),
           activatedTools,
           alreadyActive: alreadyActiveList,
           notFound,

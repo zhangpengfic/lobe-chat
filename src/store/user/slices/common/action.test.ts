@@ -1,15 +1,31 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_PREFERENCE } from '@/const/user';
+import type * as SWRLib from '@/libs/swr';
+import { taskTemplateKeys, userKeys } from '@/libs/swr/keys';
 import { userService } from '@/services/user';
 import { useUserStore } from '@/store/user';
+import { readUserDisplaySnapshot, writeUserDisplaySnapshot } from '@/store/user/displaySnapshot';
 import { userGeneralSettingsSelectors } from '@/store/user/selectors';
 import { type GlobalServerConfig } from '@/types/serverConfig';
 import { type UserInitializationState, type UserPreference } from '@/types/user';
 import { withSWR } from '~test-utils';
 
-vi.mock('zustand/traditional');
+import { isTaskTemplateRecommendationKey } from './action';
+
+const swrMocks = vi.hoisted(() => ({
+  mutate: vi.fn(),
+}));
+
+vi.mock('@/libs/swr', async (importOriginal) => {
+  const actual = await importOriginal<typeof SWRLib>();
+
+  return {
+    ...actual,
+    mutate: swrMocks.mutate,
+  };
+});
 
 vi.mock('swr', async (importOriginal) => {
   const modules = await importOriginal();
@@ -19,11 +35,29 @@ vi.mock('swr', async (importOriginal) => {
   };
 });
 
+beforeEach(() => {
+  localStorage.clear();
+  swrMocks.mutate.mockReset();
+  swrMocks.mutate.mockResolvedValue(undefined);
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe('createCommonSlice', () => {
+  describe('isTaskTemplateRecommendationKey', () => {
+    it('matches every daily recommendation cache variant', () => {
+      expect(
+        isTaskTemplateRecommendationKey(taskTemplateKeys.listDailyRecommend('seed', 3, 'zh-CN')),
+      ).toBe(true);
+      expect(
+        isTaskTemplateRecommendationKey(['taskTemplate:listDailyRecommend', 'seed', 3, 'zh-CN']),
+      ).toBe(false);
+      expect(isTaskTemplateRecommendationKey(userKeys.initState())).toBe(false);
+    });
+  });
+
   describe('updateAvatar', () => {
     it('should update avatar', async () => {
       const { result } = renderHook(() => useUserStore());
@@ -38,6 +72,60 @@ describe('createCommonSlice', () => {
 
       expect(updateAvatarSpy).toHaveBeenCalledWith('data:image/png;base64,');
       expect(spyOn).toHaveBeenCalled();
+    });
+  });
+
+  describe('updateInterests', () => {
+    it('optimistically updates user.interests before the service call resolves', async () => {
+      act(() => {
+        useUserStore.setState({ user: { id: 'u1', interests: ['old'] } as any });
+      });
+
+      let resolveService: () => void = () => {};
+      const updateSpy = vi.spyOn(userService, 'updateInterests').mockImplementation(
+        () =>
+          new Promise<void>((r) => {
+            resolveService = r;
+          }) as any,
+      );
+
+      let pending: Promise<void> | undefined;
+      act(() => {
+        pending = useUserStore.getState().updateInterests(['new']);
+      });
+
+      expect(useUserStore.getState().user?.interests).toEqual(['new']);
+
+      await act(async () => {
+        resolveService();
+        await pending;
+      });
+
+      expect(updateSpy).toHaveBeenCalledWith(['new']);
+    });
+
+    it('does not fail the interest update when recommendation cache invalidation fails', async () => {
+      act(() => {
+        useUserStore.setState({ user: { id: 'u1', interests: ['old'] } as any });
+      });
+
+      const cacheError = new Error('cache failed');
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(userService, 'updateInterests').mockResolvedValue(undefined as any);
+      swrMocks.mutate.mockImplementation((key) => {
+        if (key === isTaskTemplateRecommendationKey) return Promise.reject(cacheError);
+
+        return Promise.resolve(undefined);
+      });
+
+      await expect(useUserStore.getState().updateInterests(['new'])).resolves.toBeUndefined();
+      await waitFor(() => {
+        expect(consoleSpy).toHaveBeenCalledWith(
+          '[taskTemplate:recommendationCache:invalidate]',
+          cacheError,
+        );
+      });
+      expect(useUserStore.getState().user?.interests).toEqual(['new']);
     });
   });
 
@@ -74,6 +162,7 @@ describe('createCommonSlice', () => {
       const mockUserState: UserInitializationState = {
         userId: 'user-id',
         isOnboard: true,
+        onboarding: { finishedAt: '2024-01-01T00:00:00Z', version: 1 },
         preference: {
           telemetry: true,
         },
@@ -179,11 +268,56 @@ describe('createCommonSlice', () => {
       });
     });
 
+    it('should persist the authoritative avatar and preference for the returned user', async () => {
+      const { result } = renderHook(() => useUserStore());
+      const mockUserState: UserInitializationState = {
+        avatar: 'avatar-a',
+        preference: { lab: { enableProjects: true } },
+        settings: {},
+        userId: 'user-a',
+      };
+
+      vi.spyOn(userService, 'getUserState').mockResolvedValueOnce(mockUserState);
+
+      renderHook(() => result.current.useInitUserState(true, mockServerConfig), {
+        wrapper: withSWR,
+      });
+
+      await waitFor(() => {
+        expect(readUserDisplaySnapshot('user-a')).toEqual({
+          avatar: 'avatar-a',
+          preference: { lab: { enableProjects: true } },
+        });
+      });
+      expect(readUserDisplaySnapshot('user-b')).toBeUndefined();
+    });
+
+    it('should clear a previously cached avatar when the authoritative state has none', async () => {
+      const { result } = renderHook(() => useUserStore());
+      const mockUserState: UserInitializationState = {
+        preference: { lab: { enableProjects: true } },
+        settings: {},
+        userId: 'user-a',
+      };
+
+      vi.spyOn(userService, 'getUserState').mockResolvedValueOnce(mockUserState);
+
+      writeUserDisplaySnapshot('user-a', { avatar: 'stale-avatar' });
+      renderHook(() => result.current.useInitUserState(true, mockServerConfig), {
+        wrapper: withSWR,
+      });
+
+      await waitFor(() => {
+        expect(readUserDisplaySnapshot('user-a')?.avatar).toBe('');
+      });
+    });
+
     it('should handle the case when user state have avatar', async () => {
       const { result } = renderHook(() => useUserStore());
       const mockUserState: UserInitializationState = {
         userId: 'user-id',
         isOnboard: true,
+        onboarding: { finishedAt: '2024-01-01T00:00:00Z', version: 1 },
         preference: undefined as any,
         settings: null as any,
         avatar: 'abc',
@@ -204,6 +338,28 @@ describe('createCommonSlice', () => {
         expect(result.current.settings).toEqual({
           general: { responseLanguage: expect.any(String), timezone: expect.any(String) },
         });
+      });
+    });
+
+    it('should NOT auto-fill responseLanguage while onboarding is unfinished', async () => {
+      const { result } = renderHook(() => useUserStore());
+
+      const mockUserState: UserInitializationState = {
+        userId: 'user-id',
+        isOnboard: false,
+        // No onboarding.finishedAt: user is still in the onboarding flow.
+        preference: {} as any,
+        settings: { general: { fontSize: 14 } },
+      };
+      vi.spyOn(userService, 'getUserState').mockResolvedValueOnce(mockUserState);
+
+      renderHook(() => result.current.useInitUserState(true, mockServerConfig), {
+        wrapper: withSWR,
+      });
+
+      await waitFor(() => {
+        expect(result.current.isUserStateInit).toBeTruthy();
+        expect(result.current.settings.general?.responseLanguage).toBeUndefined();
       });
     });
 

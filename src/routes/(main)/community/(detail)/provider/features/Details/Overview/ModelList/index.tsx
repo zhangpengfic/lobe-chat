@@ -1,16 +1,17 @@
 'use client';
 
-import { ModelIcon } from '@lobehub/icons';
-import { ActionIcon, Block, Flexbox, Tooltip, TooltipGroup } from '@lobehub/ui';
+import { Block, Flexbox, Tooltip, TooltipGroup } from '@lobehub/ui';
+import { ActionIcon } from '@lobehub/ui/base-ui';
 import { cssVar } from 'antd-style';
 import { ChevronRightIcon } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
 import urlJoin from 'url-join';
 
 import InlineTable from '@/components/InlineTable';
+import { ModelIcon } from '@/components/LobeIcons';
 import { ModelInfoTags } from '@/components/ModelSelect';
+import WorkspaceLink from '@/features/Workspace/WorkspaceLink';
 import { formatPriceByCurrency, formatTokenNumber } from '@/utils/format';
 import { getTextInputUnitRate, getTextOutputUnitRate } from '@/utils/pricing';
 
@@ -33,7 +34,10 @@ const ModelList = memo(() => {
               key: 'model',
               render: (_, record) => {
                 return (
-                  <Link style={{ color: 'inherit' }} to={urlJoin('/community/model', record.id)}>
+                  <WorkspaceLink
+                    style={{ color: 'inherit' }}
+                    to={urlJoin('/community/model', record.id)}
+                  >
                     <Flexbox horizontal align="center" gap={8}>
                       <ModelIcon model={record.id} size={24} type={'avatar'} />
                       <Flexbox style={{ overflow: 'hidden' }}>
@@ -43,7 +47,7 @@ const ModelList = memo(() => {
                         </div>
                       </Flexbox>
                     </Flexbox>
-                  </Link>
+                  </WorkspaceLink>
                 );
               },
               sorter: (a, b) => a.displayName.localeCompare(b.displayName),
@@ -135,14 +139,17 @@ const ModelList = memo(() => {
               render: (_, record) => {
                 return (
                   <Flexbox horizontal align="center" gap={4} justify={'flex-end'}>
-                    <Link style={{ color: 'inherit' }} to={urlJoin('/community/model', record.id)}>
+                    <WorkspaceLink
+                      style={{ color: 'inherit' }}
+                      to={urlJoin('/community/model', record.id)}
+                    >
                       <ActionIcon
                         color={cssVar.colorTextDescription}
                         icon={ChevronRightIcon}
                         size={'small'}
                         variant={'filled'}
                       />
-                    </Link>
+                    </WorkspaceLink>
                   </Flexbox>
                 );
               },

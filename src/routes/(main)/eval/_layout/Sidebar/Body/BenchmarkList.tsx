@@ -1,6 +1,7 @@
 'use client';
 
-import { AccordionItem, Flexbox, Text } from '@lobehub/ui';
+import { AccordionItem, Flexbox } from '@lobehub/ui';
+import { Text } from '@lobehub/ui/base-ui';
 import {
   Activity,
   Award,
@@ -16,10 +17,11 @@ import {
 } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, useNavigate } from 'react-router-dom';
 
 import NavItem from '@/features/NavPanel/components/NavItem';
 import SkeletonList from '@/features/NavPanel/components/SkeletonList';
+import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
+import WorkspaceLink from '@/features/Workspace/WorkspaceLink';
 import { useEvalStore } from '@/store/eval';
 import { isModifierClick } from '@/utils/navigation';
 
@@ -49,7 +51,7 @@ interface BenchmarkListProps {
 
 const BenchmarkList = memo<BenchmarkListProps>(({ activeKey, itemKey }) => {
   const { t } = useTranslation('eval');
-  const navigate = useNavigate();
+  const navigate = useWorkspaceAwareNavigate();
   const benchmarkList = useEvalStore((s) => s.benchmarkList);
   const isInit = useEvalStore((s) => s.benchmarkListInit);
 
@@ -64,7 +66,7 @@ const BenchmarkList = memo<BenchmarkListProps>(({ activeKey, itemKey }) => {
             {t('sidebar.benchmarks')}
           </Text>
           {benchmarkList.length > 0 && (
-            <Text fontSize={11} type="secondary">
+            <Text fontSize={12} type="secondary">
               {benchmarkList.length}
             </Text>
           )}
@@ -76,7 +78,7 @@ const BenchmarkList = memo<BenchmarkListProps>(({ activeKey, itemKey }) => {
           <SkeletonList rows={3} />
         ) : benchmarkList.length > 0 ? (
           benchmarkList.map((b: any) => (
-            <Link
+            <WorkspaceLink
               key={b.id}
               to={`/eval/bench/${b.id}`}
               onClick={(e) => {
@@ -91,7 +93,7 @@ const BenchmarkList = memo<BenchmarkListProps>(({ activeKey, itemKey }) => {
                 iconSize={16}
                 title={b.name}
               />
-            </Link>
+            </WorkspaceLink>
           ))
         ) : (
           <Text fontSize={12} style={{ padding: '8px 12px' }} type="secondary">

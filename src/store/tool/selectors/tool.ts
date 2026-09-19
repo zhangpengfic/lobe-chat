@@ -1,4 +1,5 @@
-import { getKlavisServerByServerIdentifier, getLobehubSkillProviderById } from '@lobechat/const';
+import { getBuiltinRenderDisplayControl } from '@lobechat/builtin-tools/displayControls';
+import { getComposioAppByIdentifier, getLobehubSkillProviderById } from '@lobechat/const';
 import { type RenderDisplayControl, type ToolManifest } from '@lobechat/types';
 
 import {
@@ -10,7 +11,7 @@ import { type LobeToolMeta } from '@/types/tool/tool';
 
 import { type ToolStoreState } from '../initialState';
 import { builtinToolSelectors } from '../slices/builtin/selectors';
-import { KlavisServerStatus } from '../slices/klavisStore';
+import { ComposioServerStatus } from '../slices/composioStore';
 import { lobehubSkillStoreSelectors } from '../slices/lobehubSkillStore';
 import { LobehubSkillStatus } from '../slices/lobehubSkillStore/types';
 import { pluginSelectors } from '../slices/plugin/selectors';
@@ -20,6 +21,19 @@ const metaList = (s: ToolStoreState): LobeToolMeta[] => {
   const lobehubSkillList = lobehubSkillStoreSelectors.metaList(s) as LobeToolMeta[];
 
   return builtinToolSelectors.metaList(s).concat(pluginList).concat(lobehubSkillList);
+};
+
+/**
+ * All installed discoverable tools across every source (builtins, plugins, skills).
+ * Excludes only tools with `discoverable: false` (pure infrastructure / internal).
+ * Includes hidden and runtime-managed builtins (web-browsing, memory, cloud-sandbox, etc.)
+ * that `metaList` hides from the chat toolbar.
+ */
+const discoverableMetaList = (s: ToolStoreState): LobeToolMeta[] => {
+  const pluginList = pluginSelectors.installedPluginMetaList(s) as LobeToolMeta[];
+  const lobehubSkillList = lobehubSkillStoreSelectors.metaList(s) as LobeToolMeta[];
+
+  return builtinToolSelectors.discoverableMetaList(s).concat(pluginList).concat(lobehubSkillList);
 };
 
 const getMetaById =
@@ -53,10 +67,14 @@ const getManifestLoadingStatus = (id: string) => (s: ToolStoreState) => {
 
   if (s.pluginInstallLoading[id]) return 'loading';
 
+  if (s.pluginInstallErrors[id]) return 'error';
+
   if (!manifest) return 'error';
 
   if (!!manifest) return 'success';
 };
+
+const getPluginInstallError = (id: string) => (s: ToolStoreState) => s.pluginInstallErrors[id];
 
 const isToolHasUI = (id: string) => (s: ToolStoreState) => {
   const manifest = getManifestById(id)(s);
@@ -75,17 +93,24 @@ const isToolHasUI = (id: string) => (s: ToolStoreState) => {
  * Only works for builtin tools, plugins don't support this feature yet
  * @param identifier - Tool identifier
  * @param apiName - API name
+ * @param pluginState - The tool_result's plugin state, for APIs whose display
+ *   control depends on what the result carries (e.g. CC `Read` renders a
+ *   thumbnail for an image and source text for anything else). Undefined while
+ *   the call is still in flight.
  * @returns RenderDisplayControl value, defaults to 'collapsed'
  */
 const getRenderDisplayControl =
-  (identifier: string, apiName: string) =>
+  (identifier: string, apiName: string, pluginState?: unknown) =>
   (s: ToolStoreState): RenderDisplayControl => {
-    // Only builtin tools support renderDisplayControl
     const builtinTool = s.builtinTools.find((t) => t.identifier === identifier);
-    if (!builtinTool) return 'collapsed';
+    const manifestControl = builtinTool?.manifest.api.find(
+      (a) => a.name === apiName,
+    )?.renderDisplayControl;
+    if (manifestControl) return manifestControl;
 
-    const api = builtinTool.manifest.api.find((a) => a.name === apiName);
-    return api?.renderDisplayControl ?? 'collapsed';
+    // Fallback for packages that don't ship a LobeChat manifest (e.g. Claude Code —
+    // its tools come from Anthropic tool_use blocks at runtime).
+    return getBuiltinRenderDisplayControl(identifier, apiName, pluginState) ?? 'collapsed';
   };
 
 export interface AvailableToolForDiscovery {
@@ -100,15 +125,15 @@ export interface AvailableToolForDiscovery {
  *
  * Sources:
  * 1. Builtin tools (from s.builtinTools) — exclude non-discoverable, skills, platform-unavailable
- * 2. User-installed plugins (from s.installedPlugins) — exclude Klavis/LobeHub Skill/agent skill overlap
- * 3. Klavis MCP servers (connected) — description from KLAVIS_SERVER_TYPES
+ * 2. User-installed plugins (from s.installedPlugins) — exclude Composio/LobeHub Skill/agent skill overlap
+ * 3. Composio MCP servers (connected) — description from COMPOSIO_APP_TYPES
  * 4. LobeHub Skill servers (connected) — description from LOBEHUB_SKILL_PROVIDERS
  */
 const availableToolsForDiscovery = (s: ToolStoreState): AvailableToolForDiscovery[] => {
   // Build exclusion sets for deduplication
   const builtinSkillIds = new Set((s.builtinSkills || []).map((skill) => skill.identifier));
   const agentSkillIds = new Set((s.agentSkills || []).map((skill) => skill.identifier));
-  const klavisIds = new Set((s.servers || []).map((server) => server.identifier));
+  const composioIds = new Set((s.composioServers || []).map((server) => server.identifier));
   const lobehubSkillIds = new Set((s.lobehubSkillServers || []).map((server) => server.identifier));
 
   // 1. Builtin tools — directly from s.builtinTools
@@ -117,18 +142,18 @@ const availableToolsForDiscovery = (s: ToolStoreState): AvailableToolForDiscover
     .filter((tool) => !builtinSkillIds.has(tool.identifier))
     .filter((tool) => isToolAvailableInCurrentEnv(tool.identifier))
     .map((tool) => ({
-      description: tool.manifest.meta?.description || '',
+      description: tool.description || '',
       identifier: tool.identifier,
-      name: tool.manifest.meta?.title || tool.identifier,
+      name: tool.title || tool.identifier,
     }));
 
   // 2. User-installed plugins — directly from s.installedPlugins
-  //    Exclude Klavis, LobeHub Skill, and agent skill entries (they are handled in dedicated sources)
+  //    Exclude Composio, LobeHub Skill, and agent skill entries (they are handled in dedicated sources)
   const pluginItems = s.installedPlugins
-    .filter((p) => !klavisIds.has(p.identifier))
+    .filter((p) => !composioIds.has(p.identifier))
     .filter((p) => !lobehubSkillIds.has(p.identifier))
     .filter((p) => !agentSkillIds.has(p.identifier))
-    .filter((p) => !p.customParams?.klavis) // extra safety for Klavis plugins
+    .filter((p) => !p.customParams?.composio) // extra safety for Composio plugins
     .filter((plugin) => isInstalledPluginAvailableInCurrentEnv(plugin))
     .map((plugin) => {
       const meta = plugin.manifest?.meta;
@@ -139,15 +164,25 @@ const availableToolsForDiscovery = (s: ToolStoreState): AvailableToolForDiscover
       };
     });
 
-  // 3. Klavis MCP servers (connected only)
-  const klavisItems = (s.servers || [])
-    .filter((server) => server.status === KlavisServerStatus.CONNECTED && server.tools?.length)
+  // 3. Composio MCP servers (connected only)
+  const composioItems = (s.composioServers || [])
+    .filter((server) => server.status === ComposioServerStatus.ACTIVE && server.tools?.length)
+    // A connector identifier can have legacy Composio and current LobeHub
+    // connections at the same time. Tool discovery is identifier-based, so the
+    // canonical LobeHub connection must own the single visible entry.
+    .filter(
+      (server) =>
+        !s.lobehubSkillServers?.some(
+          (item) =>
+            item.identifier === server.identifier && item.status === LobehubSkillStatus.CONNECTED,
+        ),
+    )
     .map((server) => {
-      const config = getKlavisServerByServerIdentifier(server.identifier);
+      const config = getComposioAppByIdentifier(server.identifier);
       return {
         description: config?.description || '',
         identifier: server.identifier,
-        name: config?.label || server.serverName,
+        name: config?.label || server.label,
       };
     });
 
@@ -163,13 +198,15 @@ const availableToolsForDiscovery = (s: ToolStoreState): AvailableToolForDiscover
       };
     });
 
-  return [...builtinItems, ...pluginItems, ...klavisItems, ...lobehubSkillItems];
+  return [...builtinItems, ...pluginItems, ...composioItems, ...lobehubSkillItems];
 };
 
 export const toolSelectors = {
   availableToolsForDiscovery,
+  discoverableMetaList,
   getManifestById,
   getManifestLoadingStatus,
+  getPluginInstallError,
   getMetaById,
   getRenderDisplayControl,
   isToolHasUI,

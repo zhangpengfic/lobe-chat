@@ -1,17 +1,35 @@
+import type {
+  AssistantGroupSegment,
+  AssistantGroupSemanticBlock,
+} from '@lobechat/conversation-flow';
+import {
+  partitionAssistantGroupBlocks,
+  splitAssistantGroupFinalAnswer,
+} from '@lobechat/conversation-flow';
 import { Flexbox } from '@lobehub/ui';
 import { createStaticStyles } from 'antd-style';
 import isEqual from 'fast-deep-equal';
 import { memo, useMemo } from 'react';
 
 import { LOADING_FLAT } from '@/const/message';
-import { type AssistantContentBlock } from '@/types/index';
+import ContentLoading from '@/features/Conversation/Messages/components/ContentLoading';
+import { useChatStore } from '@/store/chat';
+import { operationSelectors } from '@/store/chat/slices/operation/selectors';
+import type { OperationStatus } from '@/store/chat/slices/operation/types';
+import type { AssistantContentBlock } from '@/types/index';
 
 import { messageStateSelectors, useConversationStore } from '../../../store';
+import CouncilList from '../../AgentCouncil/components/CouncilList';
 import { MessageAggregationContext } from '../../Contexts/MessageAggregationContext';
-import { areWorkflowToolsComplete, getPostToolAnswerSplitIndex } from '../toolDisplayNames';
+import { areWorkflowToolsComplete, formatReasoningDuration } from '../toolDisplayNames';
+import { isImageBearingTool } from '../toolRenderRules';
 import { CollapsedMessage } from './CollapsedMessage';
 import GroupItem from './GroupItem';
-import WorkflowCollapse from './WorkflowCollapse';
+import ProcessFold from './ProcessFold';
+import type { GroupRenderSegment } from './segments';
+import { countAssistantLlmCalls, hasRenderableFinalAnswer, shouldFoldProcess } from './segments';
+import type { RenderableAssistantContentBlock } from './types';
+import WorkflowCollapse, { type WorkflowExpandLevelDefault } from './WorkflowCollapse';
 
 const styles = createStaticStyles(({ css }) => {
   return {
@@ -27,159 +45,234 @@ interface GroupChildrenProps {
   blocks: AssistantContentBlock[];
   content?: string;
   contentId?: string;
-  defaultWorkflowExpanded?: boolean;
+  defaultWorkflowExpandLevel?: WorkflowExpandLevelDefault;
   disableEditing?: boolean;
+  /** Lab flag: fold finished non-latest turns' process under a "已处理" header. */
+  enableProcessFold?: boolean;
   id: string;
+  /** Whether this turn is the latest item in the conversation. */
+  isLatestItem?: boolean;
   messageIndex: number;
 }
 
-interface PartitionedBlocks {
-  answerBlocks: AssistantContentBlock[];
-  /** True while generating if long post-tool answer was moved outside the fold (tool phase UI may show “done”). */
-  postToolTailPromoted: boolean;
-  workingBlocks: AssistantContentBlock[];
-}
+/**
+ * Wall-clock span of a turn = last − first `createdAt` across the turn's own
+ * assistant-step messages (the group's child blocks resolved against the raw
+ * `dbMessages`). The group record's own `createdAt/updatedAt` only covers its
+ * final step, so it under-reports multi-step turns.
+ */
+const getTurnDurationMs = (
+  dbMessages: { createdAt?: Date | number | string | null; id: string }[] | undefined,
+  blocks: AssistantContentBlock[],
+): number => {
+  if (!Array.isArray(dbMessages) || blocks.length < 2) return 0;
+  const ids = new Set(blocks.map((block) => block.id));
+  let min = Infinity;
+  let max = -Infinity;
+  for (const message of dbMessages) {
+    if (!ids.has(message.id) || message.createdAt == null) continue;
+    const time =
+      message.createdAt instanceof Date
+        ? message.createdAt.getTime()
+        : new Date(message.createdAt).getTime();
+    if (Number.isNaN(time)) continue;
+    if (time < min) min = time;
+    if (time > max) max = time;
+  }
+  return max > min ? max - min : 0;
+};
 
-const isEmptyBlock = (block: AssistantContentBlock) =>
+/**
+ * `createdAt` of the turn's last step, normalized to epoch ms. Used to anchor the
+ * tail running indicator's elapsed timer to "time since the last step" instead of
+ * the whole run — the operation's own startTime marks the run's beginning.
+ *
+ * When the last block ends on tool calls, its freshest message is the tool RESULT
+ * row (`result_msg_id`), created when the tool finished — not the assistant block
+ * that issued the call. Anchoring to the block id alone would fold the tool's
+ * runtime back into the elapsed time, defeating the point. So we take the latest
+ * `createdAt` across the block and its tool-result rows.
+ */
+const getLastBlockCreatedAt = (
+  dbMessages: { createdAt?: Date | number | string | null; id: string }[] | undefined,
+  lastBlock: AssistantContentBlock | undefined,
+): number | undefined => {
+  if (!Array.isArray(dbMessages) || !lastBlock) return undefined;
+
+  const candidateIds = new Set<string>([lastBlock.id]);
+  for (const tool of lastBlock.tools ?? []) {
+    if (tool.result_msg_id) candidateIds.add(tool.result_msg_id);
+  }
+
+  let latest: number | undefined;
+  for (const message of dbMessages) {
+    if (!candidateIds.has(message.id) || message.createdAt == null) continue;
+    const time =
+      message.createdAt instanceof Date
+        ? message.createdAt.getTime()
+        : new Date(message.createdAt).getTime();
+    if (Number.isNaN(time)) continue;
+    if (latest === undefined || time > latest) latest = time;
+  }
+  return latest;
+};
+
+const ANSWER_DOM_ID_SUFFIX = '__answer';
+const WORKFLOW_DOM_ID_SUFFIX = '__workflow';
+const ACTIVE_OPERATION_STATUSES = new Set<OperationStatus>(['pending', 'paused', 'running']);
+
+const isEmptyBlock = (block: RenderableAssistantContentBlock) =>
   (!block.content || block.content === LOADING_FLAT) &&
   (!block.tools || block.tools.length === 0) &&
+  (!block.council || block.council.length === 0) &&
   !block.error &&
   !block.reasoning;
 
-/**
- * Check if a block contains any tool calls.
- */
-const hasTools = (block: AssistantContentBlock): boolean => {
-  return !!block.tools && block.tools.length > 0;
-};
+const toRenderableBlock = (block: AssistantGroupSemanticBlock): RenderableAssistantContentBlock => {
+  if (!block.projection) return block;
 
-const hasSubstantiveContent = (block: AssistantContentBlock): boolean => {
-  const content = block.content?.trim();
-  return !!content && content !== LOADING_FLAT;
-};
-
-const hasReasoningContent = (block: AssistantContentBlock): boolean => {
-  return !!block.reasoning?.content?.trim();
-};
-
-const isTrailingReasoningCandidate = (block: AssistantContentBlock): boolean => {
-  return hasReasoningContent(block) && !hasTools(block) && !block.error;
-};
-
-const splitPostToolBlocks = (
-  postBlocks: AssistantContentBlock[],
-): Pick<PartitionedBlocks, 'answerBlocks' | 'workingBlocks'> => {
-  const answerBlocks: AssistantContentBlock[] = [];
-  const workingBlocks: AssistantContentBlock[] = [];
-
-  let index = 0;
-  while (index < postBlocks.length) {
-    const block = postBlocks[index]!;
-    if (!isTrailingReasoningCandidate(block)) break;
-
-    workingBlocks.push({ ...block, content: '' });
-
-    if (hasSubstantiveContent(block) || (block.imageList?.length ?? 0) > 0) {
-      answerBlocks.push({ ...block, reasoning: undefined });
-    }
-
-    index += 1;
-  }
-
-  answerBlocks.push(...postBlocks.slice(index));
-
-  return { answerBlocks, workingBlocks };
-};
-
-/**
- * Partition blocks into "working phase" and "answer phase".
- *
- * Working phase: from first block with tools through last block with tools
- * (inclusive — interleaved content/reasoning blocks between tool blocks are included).
- *
- * Answer phase: blocks before the first tool block, plus blocks after the last tool
- * (or after detected post-tool “final answer” while still generating).
- */
-const partitionBlocks = (
-  blocks: AssistantContentBlock[],
-  isGenerating: boolean,
-): PartitionedBlocks => {
-  let lastToolIndex = -1;
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    if (hasTools(blocks[i])) {
-      lastToolIndex = i;
-      break;
-    }
-  }
-
-  if (lastToolIndex === -1) {
-    return { answerBlocks: blocks, postToolTailPromoted: false, workingBlocks: [] };
-  }
-
-  let firstToolIndex = 0;
-  for (let i = 0; i < blocks.length; i++) {
-    if (hasTools(blocks[i])) {
-      firstToolIndex = i;
-      break;
-    }
-  }
-
-  const preBlocks = blocks.slice(0, firstToolIndex);
-
-  if (isGenerating) {
-    const toolsFlat = blocks.flatMap((b) => b.tools ?? []);
-    const toolsPhaseComplete = areWorkflowToolsComplete(toolsFlat);
-    let workingEndExclusive = blocks.length;
-    let postToolTailPromoted = false;
-    if (toolsPhaseComplete) {
-      const split = getPostToolAnswerSplitIndex(blocks, lastToolIndex, toolsPhaseComplete, true);
-      if (split != null) {
-        workingEndExclusive = split;
-        postToolTailPromoted = true;
-      }
-    }
-
-    return {
-      answerBlocks: [...preBlocks, ...blocks.slice(workingEndExclusive)],
-      postToolTailPromoted,
-      workingBlocks: blocks.slice(firstToolIndex, workingEndExclusive),
-    };
-  }
-
-  const postBlocks = blocks.slice(lastToolIndex + 1);
-  const postToolReasoning = splitPostToolBlocks(postBlocks);
-  const workingBlocks = [
-    ...blocks.slice(firstToolIndex, lastToolIndex + 1),
-    ...postToolReasoning.workingBlocks,
-  ];
+  const suffix = block.projection === 'answer' ? ANSWER_DOM_ID_SUFFIX : WORKFLOW_DOM_ID_SUFFIX;
+  const key = `${block.projectionKey ?? block.id}${suffix}`;
 
   return {
-    answerBlocks: [...preBlocks, ...postToolReasoning.answerBlocks],
-    postToolTailPromoted: false,
-    workingBlocks,
+    ...block,
+    contentOverride: block.content,
+    domId: key,
+    hasToolsOverride: !!block.tools?.length,
+    renderKey: key,
   };
 };
 
+const toRenderSegments = (segments: AssistantGroupSegment[]): GroupRenderSegment[] =>
+  segments.map((segment) =>
+    segment.kind === 'answer'
+      ? { block: toRenderableBlock(segment.block), kind: 'answer' }
+      : { ...segment, blocks: segment.blocks.map(toRenderableBlock) },
+  );
+
+const withMarkdownStreamingState = (
+  block: RenderableAssistantContentBlock,
+  lastBlockId: string | undefined,
+): RenderableAssistantContentBlock => ({
+  ...block,
+  disableMarkdownStreaming: block.disableMarkdownStreaming || block.id !== lastBlockId,
+});
+
+const shouldInlineWorkflowSegment = (blocks: RenderableAssistantContentBlock[]): boolean => {
+  let toolCount = 0;
+
+  for (const block of blocks) {
+    toolCount += block.tools?.length ?? 0;
+    if (toolCount > 1) return false;
+  }
+
+  return toolCount === 1;
+};
+
+/**
+ * A workflow segment is only the "active" step while it is the last thing in the
+ * group. Once any later segment has real content below it (e.g. an errored
+ * tool block whose error text renders as a trailing answer segment), the tools
+ * are settled and the collapse should read as done rather than keep showing its
+ * streaming "working" header. Empty trailing blocks (an answer not streamed yet)
+ * don't count. `postToolTailPromoted` already covers the promoted-final-answer
+ * path at the group level; this catches the remaining segment-ordering cases.
+ */
+const hasRenderedContentAfter = (segments: GroupRenderSegment[], index: number): boolean =>
+  segments
+    .slice(index + 1)
+    .some((seg) => (seg.kind === 'workflow' ? seg.blocks.length > 0 : !isEmptyBlock(seg.block)));
+
+/**
+ * A pending intervention still needs the user's confirmation, so the collapse
+ * must keep its streaming "awaiting confirmation" chrome even when a later
+ * segment has already rendered below it. `areWorkflowToolsComplete` ignores
+ * pending tools, so the completion shortcut must not be applied here.
+ */
+const hasPendingIntervention = (blocks: RenderableAssistantContentBlock[]): boolean =>
+  blocks.some((block) => block.tools?.some((tool) => tool.intervention?.status === 'pending'));
+
 const Group = memo<GroupChildrenProps>(
-  ({ blocks, contentId, defaultWorkflowExpanded, disableEditing, messageIndex, id, content }) => {
+  ({
+    blocks,
+    contentId,
+    defaultWorkflowExpandLevel,
+    disableEditing,
+    messageIndex,
+    id,
+    content,
+    isLatestItem,
+    enableProcessFold,
+  }) => {
     const [isCollapsed, isGenerating] = useConversationStore((s) => [
       messageStateSelectors.isMessageCollapsed(id)(s),
-      messageStateSelectors.isMessageGenerating(id)(s),
+      messageStateSelectors.isAssistantGroupItemGenerating(id)(s),
     ]);
-    const contextValue = useMemo(() => ({ assistantGroupId: id }), [id]);
-
-    const { workingBlocks, answerBlocks, postToolTailPromoted } = useMemo(
-      () => partitionBlocks(blocks, isGenerating),
-      [blocks, isGenerating],
+    // A running op whose visible output already ended (`visible_output_end` →
+    // `metadata.visibleLoadingDone`) only has terminal bookkeeping left
+    // (server-side persistence, agent_runtime_end, completeRun). Treating it as
+    // still active would delay process folding by seconds after the answer
+    // finished streaming. Safe to fold early: `stream_start` resets the flag,
+    // so a follow-up step re-activates the operation.
+    const hasActiveOperation = useChatStore((s) =>
+      operationSelectors
+        .getOperationsByMessage(id)(s)
+        .some(
+          (op) =>
+            ACTIVE_OPERATION_STATUSES.has(op.status) &&
+            !(op.status === 'running' && op.metadata.visibleLoadingDone),
+        ),
     );
+    const turnDurationMs = useConversationStore((s) => getTurnDurationMs(s.dbMessages, blocks));
+    const contextValue = useMemo(() => ({ assistantGroupId: id }), [id]);
+    const lastBlock = blocks.at(-1);
+    const lastBlockId = lastBlock?.id;
+    const lastBlockCreatedAt = useConversationStore((s) =>
+      getLastBlockCreatedAt(s.dbMessages, lastBlock),
+    );
+
+    const { segments, postToolTailPromoted } = useMemo(() => {
+      const partitioned = partitionAssistantGroupBlocks(blocks, {
+        isBreakoutTool: isImageBearingTool,
+        isGenerating,
+        toolsPhaseComplete: isGenerating
+          ? areWorkflowToolsComplete(blocks.flatMap((block) => block.tools ?? []))
+          : undefined,
+      });
+
+      return {
+        postToolTailPromoted: partitioned.postToolTailPromoted,
+        segments: toRenderSegments(partitioned.segments),
+      };
+    }, [blocks, isGenerating]);
 
     const workflowChromeComplete = !isGenerating || postToolTailPromoted;
 
-    /** First non-placeholder in the answer column (pre-tool + post-tool when finalized). */
-    const firstSubstantiveAnswerIndex = useMemo(
-      () => answerBlocks.findIndex((b) => !isEmptyBlock(b)),
-      [answerBlocks],
-    );
+    // When the turn ends on an inline single-tool segment whose tool already
+    // settled but the run is still generating (waiting on the next step), the
+    // inline path renders no working chrome — unlike WorkflowCollapse, which has
+    // its own streaming header. Without this the user sees a blank gap below the
+    // finished tool. Render the same "running" indicator used at turn start to
+    // fill it. Multi-tool segments keep their own chrome; a tool still executing
+    // is covered by its own loading placeholder (areWorkflowToolsComplete=false).
+    const lastSegment = segments.at(-1);
+    // …unless that inline segment already ends on a LOADING_FLAT placeholder:
+    // that block mounts MessageContent, which renders its OWN "…is running" line
+    // (ContentBlock gates on text/LOADING_FLAT/tools), so the tail would stack a
+    // second identical line on top. Narrowly LOADING_FLAT (and tool-less): a
+    // blank `content: ''` shell — what the gateway emits on stream_start — does
+    // NOT mount MessageContent, so the tail must stay to fill the gap until the
+    // first content chunk lands.
+    const lastInlineBlock =
+      lastSegment?.kind === 'workflow' ? lastSegment.blocks.at(-1) : undefined;
+    const lastInlineRendersOwnLoading =
+      lastInlineBlock?.content === LOADING_FLAT && !lastInlineBlock.tools?.length;
+    const showTailRunningIndicator =
+      isGenerating &&
+      lastSegment?.kind === 'workflow' &&
+      shouldInlineWorkflowSegment(lastSegment.blocks) &&
+      areWorkflowToolsComplete(lastSegment.blocks.flatMap((block) => block.tools ?? [])) &&
+      !lastInlineRendersOwnLoading;
 
     if (isCollapsed) {
       return (
@@ -191,19 +284,13 @@ const Group = memo<GroupChildrenProps>(
       );
     }
 
-    return (
-      <MessageAggregationContext value={contextValue}>
-        <Flexbox className={styles.container} gap={8}>
-          {workingBlocks.length > 0 && (
-            <WorkflowCollapse
-              assistantMessageId={id}
-              blocks={workingBlocks}
-              defaultStreamingExpanded={defaultWorkflowExpanded}
-              disableEditing={disableEditing}
-              workflowChromeComplete={workflowChromeComplete}
-            />
-          )}
-          {answerBlocks.map((item, index) => {
+    const renderSegment = (segment: GroupRenderSegment, index: number) => {
+      if (segment.kind === 'workflow') {
+        if (segment.blocks.length === 0) return null;
+
+        if (segment.standalone || shouldInlineWorkflowSegment(segment.blocks)) {
+          return segment.blocks.map((block, blockIndex) => {
+            const item = withMarkdownStreamingState(block, lastBlockId);
             if (!isGenerating && isEmptyBlock(item)) return null;
 
             return (
@@ -212,14 +299,110 @@ const Group = memo<GroupChildrenProps>(
                 assistantId={id}
                 contentId={contentId}
                 disableEditing={disableEditing}
-                key={id + '.' + item.id}
+                key={item.renderKey ?? `${id}.workflow-inline.${index}.${blockIndex}`}
                 messageIndex={messageIndex}
-                isFirstBlock={
-                  firstSubstantiveAnswerIndex >= 0 && index === firstSubstantiveAnswerIndex
-                }
               />
             );
-          })}
+          });
+        }
+
+        return (
+          <WorkflowCollapse
+            assistantMessageId={id}
+            blocks={segment.blocks.map((block) => withMarkdownStreamingState(block, lastBlockId))}
+            defaultWorkflowExpandLevel={defaultWorkflowExpandLevel}
+            disableEditing={disableEditing}
+            key={segment.blocks[0]?.renderKey ?? `${id}.workflow.${index}`}
+            // While the turn's operation is still running, process folding may
+            // take over the moment it ends: the segment tree re-parents into
+            // ProcessFold, which remounts WorkflowCollapse already collapsed —
+            // one non-animated reflow. Letting the collapse also self-animate
+            // from semi → collapsed first would shrink the layout twice and make
+            // the conversation jitter. Once the op ends without a fold happening
+            // (tool-only turn, no final answer), suppression releases and
+            // WorkflowCollapse applies its completion level then.
+            suppressAutoCollapse={!!enableProcessFold && hasActiveOperation}
+            workflowChromeComplete={
+              workflowChromeComplete ||
+              (hasRenderedContentAfter(segments, index) && !hasPendingIntervention(segment.blocks))
+            }
+          />
+        );
+      }
+
+      const item = segment.block;
+
+      // AgentCouncil block: broadcast members rendered as parallel columns inside
+      // the supervisor's bubble.
+      if (item.council && item.council.length > 0) {
+        return (
+          <CouncilList
+            activeTab={0}
+            displayMode={'horizontal'}
+            key={item.renderKey ?? `${id}.${item.id}.${index}`}
+            members={item.council}
+          />
+        );
+      }
+
+      if (!isGenerating && isEmptyBlock(item)) return null;
+
+      return (
+        <GroupItem
+          {...withMarkdownStreamingState(item, lastBlockId)}
+          assistantId={id}
+          contentId={contentId}
+          disableEditing={disableEditing}
+          key={item.renderKey ?? `${id}.${item.id}.${index}`}
+          messageIndex={messageIndex}
+        />
+      );
+    };
+
+    // Codex-style turn folding: once the turn's op has ended, fold its whole
+    // process (reasoning + tools + intermediate prose) under a single "已处理
+    // {duration}" header, leaving the final answer always visible — for every
+    // turn, latest or not. Folding must never swallow the final answer, since
+    // that is the turn's payload; only the process collapses. The latest turn
+    // is eligible only once its final answer exists (so a tool-only latest turn
+    // does not collapse into a lone header); still-generating turns render in
+    // full.
+    const { processSegments, finalSegments } = splitAssistantGroupFinalAnswer(segments);
+    const llmCallCount = countAssistantLlmCalls(segments);
+    const foldProcess = shouldFoldProcess({
+      enabled: enableProcessFold,
+      hasFinalAnswer: hasRenderableFinalAnswer(finalSegments),
+      isGenerating,
+      isLatestItem,
+      operationEnded: !hasActiveOperation,
+      processSegments,
+    });
+
+    const durationText =
+      turnDurationMs >= 1000 ? formatReasoningDuration(turnDurationMs) : undefined;
+
+    return (
+      <MessageAggregationContext value={contextValue}>
+        <Flexbox className={styles.container} gap={4}>
+          {foldProcess ? (
+            <>
+              <ProcessFold durationText={durationText} stepCount={llmCallCount}>
+                <Flexbox gap={8}>
+                  {processSegments.map((segment) =>
+                    renderSegment(segment, segments.indexOf(segment)),
+                  )}
+                </Flexbox>
+              </ProcessFold>
+              {finalSegments.map((segment) => renderSegment(segment, segments.indexOf(segment)))}
+            </>
+          ) : (
+            <>
+              {segments.map((segment, index) => renderSegment(segment, index))}
+              {showTailRunningIndicator && (
+                <ContentLoading id={id} startTime={lastBlockCreatedAt} />
+              )}
+            </>
+          )}
         </Flexbox>
       </MessageAggregationContext>
     );

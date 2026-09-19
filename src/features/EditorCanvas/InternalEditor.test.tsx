@@ -10,6 +10,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type InternalEditorProps } from './InternalEditor';
 import InternalEditor from './InternalEditor';
+import { registerBlockDecoratorCaretGuard } from './registerBlockDecoratorCaretGuard';
+
+vi.mock('./registerBlockDecoratorCaretGuard', () => ({
+  registerBlockDecoratorCaretGuard: vi.fn(() => vi.fn()),
+}));
 
 // Suppress console.warn for expected errors in tests
 const originalWarn = console.warn;
@@ -105,7 +110,7 @@ describe('InternalEditor', () => {
 
       // Find the Editor component's container
       const editorContainer = container.querySelector('[data-lexical-editor]')?.closest('div');
-      // The style should include paddingBottom: 64 (default) merged with custom styles
+      // The style should include paddingBottom: 32 (default) merged with custom styles
       expect(editorContainer).toBeTruthy();
     });
   });
@@ -477,6 +482,58 @@ describe('InternalEditor', () => {
       const text = editorInstance!.getDocument('text') as unknown as string;
       expect(text).toContain('Heading');
       expect(text).toContain('Paragraph');
+    });
+  });
+
+  describe('block image caret guard', () => {
+    it('is not registered by default (document body keeps stock editor behaviour)', async () => {
+      vi.mocked(registerBlockDecoratorCaretGuard).mockClear();
+      let editorInstance: IEditor | undefined;
+
+      render(
+        <MinimalTestWrapper
+          onEditorReady={(e) => {
+            editorInstance = e;
+          }}
+        />,
+      );
+
+      await act(async () => {
+        await moment();
+      });
+      await waitFor(() => {
+        expect(editorInstance).toBeDefined();
+      });
+
+      expect(registerBlockDecoratorCaretGuard).not.toHaveBeenCalled();
+    });
+
+    it('registers the guard for the editor when blockImageCaretGuard is set and unregisters on unmount', async () => {
+      vi.mocked(registerBlockDecoratorCaretGuard).mockClear();
+      const unregister = vi.fn();
+      vi.mocked(registerBlockDecoratorCaretGuard).mockReturnValueOnce(unregister);
+      let editorInstance: IEditor | undefined;
+
+      const { unmount } = render(
+        <MinimalTestWrapper
+          blockImageCaretGuard
+          onEditorReady={(e) => {
+            editorInstance = e;
+          }}
+        />,
+      );
+
+      await act(async () => {
+        await moment();
+      });
+      await waitFor(() => {
+        expect(editorInstance).toBeDefined();
+      });
+
+      expect(registerBlockDecoratorCaretGuard).toHaveBeenCalledWith(editorInstance);
+
+      unmount();
+      expect(unregister).toHaveBeenCalled();
     });
   });
 

@@ -1,8 +1,23 @@
 import { electronAPI } from '@electron-toolkit/preload';
-import { contextBridge } from 'electron';
+import type { RendererMemoryInfo, ScreenCaptureSession } from '@lobechat/electron-client-ipc';
+import { contextBridge, ipcRenderer } from 'electron';
+
+import { readSystemLanguageArg } from '~common/systemLanguage';
 
 import { invoke } from './invoke';
 import { onStreamInvoke } from './streamer';
+
+const screenCaptureSessionListeners = new Set<(session: ScreenCaptureSession) => void>();
+
+let latestScreenCaptureSession: ScreenCaptureSession | null = null;
+
+ipcRenderer.on('screenCaptureSession', (_event, session: ScreenCaptureSession) => {
+  latestScreenCaptureSession = session;
+
+  for (const listener of screenCaptureSessionListeners) {
+    listener(session);
+  }
+});
 
 export const setupElectronApi = () => {
   // Use `contextBridge` APIs to expose Electron APIs to
@@ -16,7 +31,37 @@ export const setupElectronApi = () => {
   }
 
   contextBridge.exposeInMainWorld('electronAPI', {
+    getDesktopBootstrapIdentity: () => ipcRenderer.sendSync('desktop:get-bootstrap-identity'),
+    getRendererMemoryInfo: async (): Promise<RendererMemoryInfo> => {
+      const memory = await process.getProcessMemoryInfo();
+      const heap = process.getHeapStatistics();
+      const blink = process.getBlinkMemoryInfo();
+
+      return {
+        blink: { allocatedBytes: blink.allocated * 1024, totalBytes: blink.total * 1024 },
+        heap: {
+          limitBytes: heap.heapSizeLimit * 1024,
+          mallocedBytes: heap.mallocedMemory * 1024,
+          physicalBytes: heap.totalPhysicalSize * 1024,
+          totalBytes: heap.totalHeapSize * 1024,
+          usedBytes: heap.usedHeapSize * 1024,
+        },
+        privateBytes: memory.private * 1024,
+        sharedBytes: memory.shared * 1024,
+      };
+    },
     invoke,
+    onScreenCaptureSession: (listener: (session: ScreenCaptureSession) => void) => {
+      screenCaptureSessionListeners.add(listener);
+
+      if (latestScreenCaptureSession) {
+        listener(latestScreenCaptureSession);
+      }
+
+      return () => {
+        screenCaptureSessionListeners.delete(listener);
+      };
+    },
     onStreamInvoke,
   });
 
@@ -31,5 +76,8 @@ export const setupElectronApi = () => {
     isMacTahoe: process.platform === 'darwin' && darwinMajorVersion >= 25,
     nodeVersion: process.versions.node,
     platform: process.platform,
+    systemLanguage: readSystemLanguageArg(process.argv),
   });
 };
+
+export type SetupElectronApiFunction = typeof setupElectronApi;

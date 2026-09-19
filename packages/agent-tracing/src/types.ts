@@ -2,12 +2,7 @@ export interface ExecutionSnapshot {
   agentId?: string;
   completedAt?: number;
   completionReason?:
-    | 'done'
-    | 'error'
-    | 'interrupted'
-    | 'max_steps'
-    | 'cost_limit'
-    | 'waiting_for_human';
+    'done' | 'error' | 'interrupted' | 'max_steps' | 'cost_limit' | 'waiting_for_human';
   error?: { type: string; message: string };
   externalRetryCount?: number;
   model?: string;
@@ -37,6 +32,22 @@ export interface StepSnapshot {
     phase: string;
     payload?: unknown;
     stepContext?: unknown;
+  };
+  /**
+   * Context Engine result snapshot for this step. Only present on steps where the CE ran
+   * (typically `call_llm`). Uses a delta format: only `input`/`output` fields that changed
+   * from the previous step are stored — resolve the full snapshot by walking backward
+   * through steps (same pattern as `messagesBaseline`/`messagesDelta`).
+   *
+   * - `undefined`        → CE did not run for this step (e.g., `call_tool` steps)
+   * - `{}`               → CE ran but both `input` and `output` are unchanged from before
+   * - `{ input }`        → input changed; `output` unchanged
+   * - `{ output }`       → output changed; `input` unchanged
+   * - `{ input, output}` → both changed (full snapshot, typical of the first CE event)
+   */
+  contextEngine?: {
+    input?: unknown;
+    output?: unknown;
   };
   events?: Array<{ type: string; [key: string]: unknown }>;
 
@@ -97,13 +108,24 @@ export interface StepSnapshot {
   toolsetBaseline?: any;
   toolsResult?: Array<{
     apiName: string;
+    /**
+     * Wall time the tool took on the DEVICE, by its own clock — present only
+     * for calls dispatched to one, and only when the device and gateway are new
+     * enough to report it. `executionTimeMs - deviceExecutionTimeMs` is the
+     * dispatch overhead: how much of a device tool call is transport rather
+     * than work.
+     */
+    deviceExecutionTimeMs?: number;
+    /** Wall time the server observed for the call, dispatch included. */
+    executionTimeMs?: number;
     identifier: string;
     isSuccess?: boolean;
     output?: string;
   }>;
+  // Cost incurred by this step, not the whole operation.
   totalCost: number;
 
-  // Cumulative
+  // Total tokens consumed by this step, not the whole operation.
   totalTokens: number;
 }
 

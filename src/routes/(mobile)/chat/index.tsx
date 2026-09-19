@@ -2,9 +2,8 @@
 
 import { memo } from 'react';
 
-import MainInterfaceTracker from '@/components/Analytics/MainInterfaceTracker';
+import ChatHydration from '@/routes/(main)/agent/features/Conversation/ChatHydration';
 import ConversationArea from '@/routes/(main)/agent/features/Conversation/ConversationArea';
-import PageTitle from '@/routes/(main)/agent/features/PageTitle';
 import PortalPanel from '@/routes/(main)/agent/features/Portal/features/PortalPanel';
 import TelemetryNotification from '@/routes/(main)/agent/features/TelemetryNotification';
 
@@ -13,11 +12,10 @@ import Topic from './features/Topic';
 const MobileChatPage = memo(() => {
   return (
     <>
-      <PageTitle />
+      <ChatHydration />
       <ConversationArea />
       <Topic />
       <PortalPanel mobile />
-      <MainInterfaceTracker />
       <TelemetryNotification mobile />
     </>
   );
